@@ -39,15 +39,15 @@ app.get('/api/admin/import', async (req, res) => {
   const state = req.query.state || null;
   if (!city) return res.status(400).json({ error: 'Missing ?city=' });
   try {
-    const query = `
-      [out:json][timeout:60];
-      area["name"="${city.replace(/"/g, '\\"')}"]["boundary"="administrative"]->.searchArea;
-      (
-        node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-        way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-      );
-      out center tags;
-    `;
+   const query = `
+  [out:json][timeout:60];
+  area(3600197472)->.searchArea;
+  (
+    node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+    way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+  );
+  out center tags;
+`;
     const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
       method: 'POST',
       headers: {
