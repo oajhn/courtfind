@@ -53,7 +53,7 @@ app.get('/api/admin/import', async (req, res) => {
       );
       out center tags;
     `;
-    const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
+    const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: query,
