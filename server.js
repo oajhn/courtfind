@@ -53,12 +53,18 @@ app.get('/api/admin/import', async (req, res) => {
       );
       out center tags;
     `;
-    const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
+       const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: query,
     });
-    const data = await overpassRes.json();
+    const rawText = await overpassRes.text();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      return res.status(502).json({ error: 'Overpass returned non-JSON', detail: rawText.slice(0, 500) });
+    }
     const excluded = new Set(['private', 'no', 'customers']);
 
     const courts = (data.elements || [])
