@@ -1,12 +1,9 @@
 const path = require('path');
 const express = require('express');
 const { getCities, searchCourts } = require('./db');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 app.use(express.static(path.join(__dirname, 'public')));
-
 // GET /api/cities -> list of cities currently in the database + court counts
 app.get('/api/cities', (req, res) => {
   try {
@@ -16,7 +13,6 @@ app.get('/api/cities', (req, res) => {
     res.status(500).json({ error: 'Failed to load cities' });
   }
 });
-
 // GET /api/courts?city=Nashville&q=park&lit=yes&minHoops=2
 app.get('/api/courts', (req, res) => {
   try {
@@ -42,7 +38,6 @@ app.get('/api/admin/import', async (req, res) => {
   const city = req.query.city;
   const state = req.query.state || null;
   if (!city) return res.status(400).json({ error: 'Missing ?city=' });
-
   try {
     const query = `
       [out:json][timeout:60];
@@ -53,9 +48,12 @@ app.get('/api/admin/import', async (req, res) => {
       );
       out center tags;
     `;
-       const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
+    const overpassRes = await fetch('https://overpass.kumi.systems/api/interpreter', {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
+      headers: {
+        'Content-Type': 'text/plain',
+        'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)',
+      },
       body: query,
     });
     const rawText = await overpassRes.text();
@@ -66,7 +64,6 @@ app.get('/api/admin/import', async (req, res) => {
       return res.status(502).json({ error: 'Overpass returned non-JSON', detail: rawText.slice(0, 500) });
     }
     const excluded = new Set(['private', 'no', 'customers']);
-
     const courts = (data.elements || [])
       .map((el) => {
         const tags = el.tags || {};
@@ -90,7 +87,6 @@ app.get('/api/admin/import', async (req, res) => {
         };
       })
       .filter(Boolean);
-
     upsertCourts(courts);
     res.json({ imported: courts.length, city });
   } catch (err) {
