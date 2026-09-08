@@ -33,7 +33,64 @@ app.get('/api/courts', (req, res) => {
     res.status(500).json({ error: 'Failed to load courts' });
   }
 });
+// One-time data import endpoint — protected by a secret key.
+app.get('/api/admin/import', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const { upsertCourts } = require('./db');
+  const city = req.query.city;
+  const state = req.query.state || null;
+  if (!city) return res.status(400).json({ error: 'Missing ?city=' });
 
+  try {
+    const query = `
+      [out:json][timeout:60];
+      area["name"="${city.replace(/"/g, '\\"')}"]["boundary"="administrative"]->.searchArea;
+      (
+        node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+        way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+      );
+      out center tags;
+    `;
+    const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: query,
+    });
+    const data = await overpassRes.json();
+    const excluded = new Set(['private', 'no', 'customers']);
+
+    const courts = (data.elements || [])
+      .map((el) => {
+        const tags = el.tags || {};
+        const access = (tags.access || 'unknown').toLowerCase();
+        if (excluded.has(access)) return null;
+        const lat = el.lat ?? el.center?.lat;
+        const lng = el.lon ?? el.center?.lon;
+        if (lat == null || lng == null) return null;
+        const addr = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
+        return {
+          osm_id: `${el.type}/${el.id}`,
+          name: tags.name || 'Unnamed Court',
+          city, state,
+          address: addr || null,
+          lat, lng,
+          surface: tags.surface || null,
+          hoops: tags.hoops ? parseInt(tags.hoops, 10) : null,
+          lit: tags.lit || 'unknown',
+          access,
+          source: 'openstreetmap',
+        };
+      })
+      .filter(Boolean);
+
+    upsertCourts(courts);
+    res.json({ imported: courts.length, city });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`CourtFinder running at http://localhost:${PORT}`);
   console.log(`If the database is empty, run: npm run fetch-courts -- --city "Nashville"`);
