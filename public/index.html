@@ -282,6 +282,11 @@
   let markers = {};
   let markerLayer = L.layerGroup().addTo(map);
 
+  // Below this zoom level, a viewport query could span multiple cities/states
+  // worth of courts — too many markers to usefully render, so we show a
+  // "zoom in" message instead of querying.
+  const MIN_VIEWPORT_ZOOM = 11;
+
   const els = {
     search: document.getElementById('search'),
     city: document.getElementById('city-filter'),
@@ -324,20 +329,58 @@
     }
   }
 
-  function buildQuery() {
+  function baseFilterParams() {
     const params = new URLSearchParams();
     if (els.search.value.trim()) params.set('q', els.search.value.trim());
-    if (els.city.value) params.set('city', els.city.value);
-    if (els.neighborhood.value) params.set('neighborhood', els.neighborhood.value);
     if (els.lit.value) params.set('lit', els.lit.value);
-    return params.toString();
+    return params;
   }
 
-  async function loadCourts() {
-    const res = await fetch('/api/courts?' + buildQuery());
+  // City mode: a specific city is selected — fetch all its courts (city-scale
+  // counts are small enough to load in full) and zoom the map to fit them.
+  async function loadCourtsByCity() {
+    const params = baseFilterParams();
+    params.set('city', els.city.value);
+    if (els.neighborhood.value) params.set('neighborhood', els.neighborhood.value);
+    const res = await fetch('/api/courts?' + params.toString());
     const courts = await res.json();
     renderResults(courts);
-    renderMarkers(courts);
+    renderMarkers(courts, { fitToResults: true });
+  }
+
+  // Viewport mode ("All cities"): fetch only courts inside the map's current
+  // visible bounds, refetching as the user pans/zooms. Guards against
+  // zooming out too far, where a bounds query could span the whole country.
+  async function loadCourtsByViewport() {
+    if (map.getZoom() < MIN_VIEWPORT_ZOOM) {
+      markerLayer.clearLayers();
+      markers = {};
+      els.count.textContent = 'Zoom in to see courts';
+      els.results.innerHTML = `<div class="empty-state">
+        Zoomed out too far to load courts here. Zoom in on a city or area,
+        or pick a specific city from the dropdown above.
+      </div>`;
+      return;
+    }
+    const b = map.getBounds();
+    const params = baseFilterParams();
+    params.set('north', b.getNorth());
+    params.set('south', b.getSouth());
+    params.set('east', b.getEast());
+    params.set('west', b.getWest());
+    const res = await fetch('/api/courts?' + params.toString());
+    const courts = await res.json();
+    renderResults(courts);
+    renderMarkers(courts, { fitToResults: false });
+  }
+
+  // Dispatches to the right mode based on whether a city is selected.
+  async function loadCourts() {
+    if (els.city.value) {
+      await loadCourtsByCity();
+    } else {
+      await loadCourtsByViewport();
+    }
   }
 
   function renderResults(courts) {
@@ -367,16 +410,20 @@
     }
   }
 
-  function renderMarkers(courts) {
+  function renderMarkers(courts, { fitToResults }) {
     markerLayer.clearLayers();
     markers = {};
     for (const c of courts) {
       const m = L.marker([c.lat, c.lng], { icon: makeBasketballIcon() })
-        .bindPopup(`<b>${escapeHtml(c.name)}</b><br>${escapeHtml(c.address || '')}`);
+        .bindPopup(`
+          <b>${escapeHtml(c.name)}</b><br>
+          ${c.neighborhood ? `<span style="font-size:12px;color:#a8a39a;">${escapeHtml(c.neighborhood)}</span><br>` : ''}
+          ${escapeHtml(c.address || '')}
+        `);
       m.addTo(markerLayer);
       markers[c.id] = m;
     }
-    if (courts.length > 0) {
+    if (fitToResults && courts.length > 0) {
       const bounds = L.latLngBounds(courts.map(c => [c.lat, c.lng]));
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 });
     }
@@ -398,6 +445,13 @@
   els.city.addEventListener('change', () => { loadNeighborhoods().then(loadCourts); });
   els.neighborhood.addEventListener('change', loadCourts);
   els.lit.addEventListener('change', loadCourts);
+
+  // Refetch on pan/zoom, but only in viewport mode ("All cities") — when a
+  // specific city is selected, the map only moves because loadCourtsByCity
+  // just fit-bounded it, and re-querying on that would fight the city filter.
+  map.on('moveend', () => {
+    if (!els.city.value) debouncedLoad();
+  });
 
   loadCities().then(loadCourts);
 </script>
