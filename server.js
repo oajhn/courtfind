@@ -94,35 +94,13 @@ async function fetchOverpass(query) {
   }
 }
 
-// Looks up a city's OSM boundary automatically via Nominatim, so you don't
-// have to manually find a relation ID for every city. Converts the result
-// into the Overpass "area id" format (relation id + 3600000000, or
-// way id + 2400000000).
-async function resolveAreaId(city, state) {
-  const query = state ? `${city}, ${state}, USA` : `${city}, USA`;
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&limit=1`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)' },
-  });
-  const rawText = await res.text();
-  let results;
-  try {
-    results = JSON.parse(rawText);
-  } catch {
-    throw new Error(
-      `Nominatim didn't return JSON (likely rate-limited from requests sent too close together): ${rawText.slice(0, 150)}. Wait about 10-15 seconds and try this city again.`
-    );
-  }
-  if (!results || results.length === 0) {
-    throw new Error(`Nominatim found no match for "${query}". Try adjusting the city/state spelling, or pass ?areaId= manually.`);
-  }
-  const match = results[0];
-  if (match.osm_type === 'relation') return Number(match.osm_id) + 3600000000;
-  if (match.osm_type === 'way') return Number(match.osm_id) + 2400000000;
-  throw new Error(`Nominatim matched "${query}" to a single point, not a boundary — try adding a state, or pass ?areaId= manually.`);
-}
-
 // One-time (per city) data import endpoint — protected by a secret key.
+// Two ways to scope the query area:
+//   1. Radius mode (recommended, no external lookup needed):
+//      ?lat=36.1627&lng=-86.7816&radiusKm=20
+//   2. Admin-boundary mode (tighter fit to city limits, needs a known OSM
+//      relation id — see openstreetmap.org, search the city, relation id is
+//      in the URL): ?areaId=3600197472
 app.get('/api/admin/import', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -131,51 +109,72 @@ app.get('/api/admin/import', async (req, res) => {
   const state = req.query.state || null;
   if (!city) return res.status(400).json({ error: 'Missing ?city=' });
 
-  let areaId = req.query.areaId;
-  let resolvedVia = 'manual';
-  try {
-    if (!areaId) {
-      areaId = await resolveAreaId(city, state);
-      resolvedVia = 'nominatim';
-    }
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
+  const areaId = req.query.areaId || null;
+  const lat = req.query.lat ? Number(req.query.lat) : null;
+  const lng = req.query.lng ? Number(req.query.lng) : null;
+  const radiusKm = req.query.radiusKm ? Number(req.query.radiusKm) : 20;
+
+  if (!areaId && (lat == null || lng == null)) {
+    return res.status(400).json({ error: 'Provide either ?areaId= (admin boundary) or ?lat=&lng= (radius mode)' });
   }
+
+  const radiusMeters = radiusKm * 1000;
 
   try {
     // 1. Fetch the courts themselves.
-    const courtsQuery = `
-      [out:json][timeout:60];
-      area(${areaId})->.searchArea;
-      (
-        node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-        way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-      );
-      out center tags;
-    `;
+    const courtsQuery = areaId
+      ? `
+        [out:json][timeout:60];
+        area(${areaId})->.searchArea;
+        (
+          node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+          way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
+        );
+        out center tags;
+      `
+      : `
+        [out:json][timeout:60];
+        (
+          node["leisure"="pitch"]["sport"="basketball"](around:${radiusMeters},${lat},${lng});
+          way["leisure"="pitch"]["sport"="basketball"](around:${radiusMeters},${lat},${lng});
+        );
+        out center tags;
+      `;
     const courtsData = await fetchOverpass(courtsQuery);
 
-    // 2. Fetch every named park in the area, with full boundary geometry
-    //    (used to fill in a court's name when it has none of its own).
-    const parksQuery = `
-      [out:json][timeout:60];
-      area(${areaId})->.searchArea;
-      way["leisure"="park"]["name"](area.searchArea);
-      out geom;
-    `;
+    // 2. Fetch every named park in the same scope, with full boundary
+    //    geometry (used to fill in a court's name when it has none of its own).
+    const parksQuery = areaId
+      ? `
+        [out:json][timeout:60];
+        area(${areaId})->.searchArea;
+        way["leisure"="park"]["name"](area.searchArea);
+        out geom;
+      `
+      : `
+        [out:json][timeout:60];
+        way["leisure"="park"]["name"](around:${radiusMeters},${lat},${lng});
+        out geom;
+      `;
     const parksData = await fetchOverpass(parksQuery);
     const parks = (parksData.elements || []).filter((el) => el.geometry && el.tags?.name);
 
-    // 3. Fetch neighborhood/suburb points in the area (used to label which
-    //    part of the city each court is in). Most OSM neighborhoods are
-    //    tagged as single points, not boundary polygons, so we match each
-    //    court to whichever neighborhood point is geographically closest.
-    const neighborhoodsQuery = `
-      [out:json][timeout:60];
-      area(${areaId})->.searchArea;
-      node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](area.searchArea);
-      out;
-    `;
+    // 3. Fetch neighborhood/suburb points in the same scope (used to label
+    //    which part of the city each court is in). Most OSM neighborhoods
+    //    are tagged as single points, not boundary polygons, so we match
+    //    each court to whichever neighborhood point is geographically closest.
+    const neighborhoodsQuery = areaId
+      ? `
+        [out:json][timeout:60];
+        area(${areaId})->.searchArea;
+        node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](area.searchArea);
+        out;
+      `
+      : `
+        [out:json][timeout:60];
+        node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](around:${radiusMeters},${lat},${lng});
+        out;
+      `;
     const neighborhoodsData = await fetchOverpass(neighborhoodsQuery);
     const neighborhoods = (neighborhoodsData.elements || [])
       .filter((el) => el.lat != null && el.lon != null && el.tags?.name)
@@ -235,8 +234,9 @@ app.get('/api/admin/import', async (req, res) => {
     res.json({
       imported: courts.length,
       city,
-      areaId,
-      resolvedVia,
+      mode: areaId ? 'areaId' : 'radius',
+      areaId: areaId || undefined,
+      radiusKm: areaId ? undefined : radiusKm,
       stillUnnamed,
       parksFound: parks.length,
       neighborhoodsFound: neighborhoods.length,
