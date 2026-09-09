@@ -221,6 +221,11 @@
         <option value="no">Not lit</option>
       </select>
     </div>
+    <div class="filter-row">
+      <select id="neighborhood-filter">
+        <option value="">All areas</option>
+      </select>
+    </div>
   </div>
 
   <div class="results-count" id="results-count">Loading courts…</div>
@@ -250,6 +255,7 @@
     search: document.getElementById('search'),
     city: document.getElementById('city-filter'),
     lit: document.getElementById('lit-filter'),
+    neighborhood: document.getElementById('neighborhood-filter'),
     results: document.getElementById('results'),
     count: document.getElementById('results-count'),
   };
@@ -273,10 +279,25 @@
     }
   }
 
+  async function loadNeighborhoods() {
+    els.neighborhood.innerHTML = '<option value="">All areas</option>';
+    els.neighborhood.value = '';
+    if (!els.city.value) return; // no city selected, nothing to narrow by yet
+    const res = await fetch('/api/neighborhoods?city=' + encodeURIComponent(els.city.value));
+    const neighborhoods = await res.json();
+    for (const n of neighborhoods) {
+      const opt = document.createElement('option');
+      opt.value = n.neighborhood;
+      opt.textContent = `${n.neighborhood} (${n.count})`;
+      els.neighborhood.appendChild(opt);
+    }
+  }
+
   function buildQuery() {
     const params = new URLSearchParams();
     if (els.search.value.trim()) params.set('q', els.search.value.trim());
     if (els.city.value) params.set('city', els.city.value);
+    if (els.neighborhood.value) params.set('neighborhood', els.neighborhood.value);
     if (els.lit.value) params.set('lit', els.lit.value);
     return params.toString();
   }
@@ -301,7 +322,7 @@
       card.dataset.id = c.id;
       card.innerHTML = `
         <p class="court-name">${escapeHtml(c.name)}</p>
-        <p class="court-meta">${escapeHtml(c.address || c.city)}</p>
+        <p class="court-meta">${escapeHtml(c.neighborhood ? `${c.neighborhood} — ${c.address || c.city}` : (c.address || c.city))}</p>
         <div>
           ${c.lit === 'yes' ? '<span class="tag tag-lit">Lit</span>' : ''}
           ${c.hoops ? `<span class="tag tag-hoops">${c.hoops} hoop${c.hoops > 1 ? 's' : ''}</span>` : ''}
@@ -343,7 +364,8 @@
   }
 
   els.search.addEventListener('input', debouncedLoad);
-  els.city.addEventListener('change', loadCourts);
+  els.city.addEventListener('change', () => { loadNeighborhoods().then(loadCourts); });
+  els.neighborhood.addEventListener('change', loadCourts);
   els.lit.addEventListener('change', loadCourts);
 
   loadCities().then(loadCourts);
