@@ -1,6 +1,6 @@
 const path = require('path');
 const express = require('express');
-const { getCities, getNeighborhoods, searchCourts, upsertCourts } = require('./db');
+const { getCities, getNeighborhoods, searchCourts, upsertCourts, updateCourt } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
@@ -28,15 +28,20 @@ app.get('/api/neighborhoods', async (req, res) => {
 });
 
 // GET /api/courts?city=Nashville&neighborhood=East%20Nashville&q=park&lit=yes&minHoops=2
+// or, for viewport-based loading: &north=&south=&east=&west=
 app.get('/api/courts', async (req, res) => {
   try {
-    const { city, neighborhood, q, lit, minHoops } = req.query;
+    const { city, neighborhood, q, lit, minHoops, north, south, east, west } = req.query;
+    const bounds = (north && south && east && west)
+      ? { north: Number(north), south: Number(south), east: Number(east), west: Number(west) }
+      : null;
     const courts = await searchCourts({
       city: city || null,
       neighborhood: neighborhood || null,
       q: q || null,
       lit: lit || null,
       minHoops: minHoops ? Number(minHoops) : null,
+      bounds,
     });
     res.json(courts);
   } catch (err) {
@@ -89,6 +94,26 @@ async function fetchOverpass(query) {
   }
 }
 
+// Looks up a city's OSM boundary automatically via Nominatim, so you don't
+// have to manually find a relation ID for every city. Converts the result
+// into the Overpass "area id" format (relation id + 3600000000, or
+// way id + 2400000000).
+async function resolveAreaId(city, state) {
+  const query = state ? `${city}, ${state}, USA` : `${city}, USA`;
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&limit=1`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)' },
+  });
+  const results = await res.json();
+  if (!results || results.length === 0) {
+    throw new Error(`Nominatim found no match for "${query}". Try adjusting the city/state spelling, or pass ?areaId= manually.`);
+  }
+  const match = results[0];
+  if (match.osm_type === 'relation') return Number(match.osm_id) + 3600000000;
+  if (match.osm_type === 'way') return Number(match.osm_id) + 2400000000;
+  throw new Error(`Nominatim matched "${query}" to a single point, not a boundary — try adding a state, or pass ?areaId= manually.`);
+}
+
 // One-time (per city) data import endpoint — protected by a secret key.
 app.get('/api/admin/import', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_KEY) {
@@ -96,9 +121,18 @@ app.get('/api/admin/import', async (req, res) => {
   }
   const city = req.query.city;
   const state = req.query.state || null;
-  const areaId = req.query.areaId; // e.g. 3600197472 for Nashville's relation R197472
   if (!city) return res.status(400).json({ error: 'Missing ?city=' });
-  if (!areaId) return res.status(400).json({ error: 'Missing ?areaId= (OSM relation id x 3600000000, e.g. 3600197472 for Nashville)' });
+
+  let areaId = req.query.areaId;
+  let resolvedVia = 'manual';
+  try {
+    if (!areaId) {
+      areaId = await resolveAreaId(city, state);
+      resolvedVia = 'nominatim';
+    }
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
 
   try {
     // 1. Fetch the courts themselves.
@@ -193,10 +227,37 @@ app.get('/api/admin/import', async (req, res) => {
     res.json({
       imported: courts.length,
       city,
+      areaId,
+      resolvedVia,
       stillUnnamed,
       parksFound: parks.length,
       neighborhoodsFound: neighborhoods.length,
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manually correct a court's name or neighborhood — no shell needed.
+// Usage: /api/admin/edit-court?key=...&id=42&name=Shelby%20Park%20Court&neighborhood=East%20Nashville
+// Omit either `name` or `neighborhood` to leave that field unchanged.
+app.get('/api/admin/edit-court', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const id = req.query.id;
+  if (!id) return res.status(400).json({ error: 'Missing ?id=' });
+  const updates = {};
+  if (req.query.name !== undefined) updates.name = req.query.name;
+  if (req.query.neighborhood !== undefined) updates.neighborhood = req.query.neighborhood;
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'Provide ?name= and/or ?neighborhood= to update' });
+  }
+  try {
+    const updated = await updateCourt(id, updates);
+    if (!updated) return res.status(404).json({ error: 'No court found with that id' });
+    res.json({ updated: true, court: updated });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
