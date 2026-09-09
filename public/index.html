@@ -189,6 +189,19 @@
   .leaflet-popup-tip { background: var(--asphalt); }
   .leaflet-popup-content b { color: var(--paint-orange); }
 
+  @keyframes court-bounce {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50% { transform: translateY(-7px) scale(1.03); }
+  }
+
+  .basketball-marker {
+    animation-name: court-bounce;
+    animation-duration: 1.1s;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+    animation-iteration-count: infinite;
+    filter: drop-shadow(0 3px 3px rgba(0,0,0,0.5));
+  }
+
   @media (max-width: 720px) {
     .panel { width: calc(100% - 32px); left: 16px; right: 16px; bottom: 16px; top: auto; height: 46%; }
     header { padding: 20px 20px 0; }
@@ -236,16 +249,35 @@
 <script>
   const map = L.map('map', { zoomControl: false }).setView([36.1627, -86.7816], 12); // default: Nashville
   L.control.zoom({ position: 'bottomright' }).addTo(map);
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics',
-  maxZoom: 19,
-}).addTo(map);
 
-  const markerIcon = L.divIcon({
-    className: 'court-marker',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:#D6491F;border:2px solid #F0EDE6;box-shadow:0 0 0 2px rgba(0,0,0,0.4);"></div>`,
-    iconSize: [14, 14],
-  });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19,
+  }).addTo(map);
+
+  function makeBasketballIcon() {
+    // Slightly randomized duration/delay per marker so a cluster of courts
+    // doesn't bounce in perfect unison — reads as more alive.
+    const duration = (0.95 + Math.random() * 0.3).toFixed(2);
+    const delay = (-Math.random() * 1.2).toFixed(2); // negative delay = starts mid-cycle
+    return L.divIcon({
+      className: 'court-marker',
+      html: `
+        <div class="basketball-marker" style="animation-duration:${duration}s; animation-delay:${delay}s; width:22px; height:22px;">
+          <svg viewBox="0 0 24 24" width="22" height="22">
+            <circle cx="12" cy="12" r="10.2" fill="#C8631C" stroke="#3A2213" stroke-width="0.9"/>
+            <path d="M12 1.8 V22.2" stroke="#3A2213" stroke-width="1"/>
+            <path d="M1.8 12 H22.2" stroke="#3A2213" stroke-width="1"/>
+            <path d="M4.3 4.3 C9 8, 9 16, 4.3 19.7" stroke="#3A2213" stroke-width="1" fill="none"/>
+            <path d="M19.7 4.3 C15 8, 15 16, 19.7 19.7" stroke="#3A2213" stroke-width="1" fill="none"/>
+          </svg>
+        </div>
+      `,
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+      popupAnchor: [0, -12],
+    });
+  }
 
   let markers = {};
   let markerLayer = L.layerGroup().addTo(map);
@@ -339,7 +371,7 @@ L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/
     markerLayer.clearLayers();
     markers = {};
     for (const c of courts) {
-      const m = L.marker([c.lat, c.lng], { icon: markerIcon })
+      const m = L.marker([c.lat, c.lng], { icon: makeBasketballIcon() })
         .bindPopup(`<b>${escapeHtml(c.name)}</b><br>${escapeHtml(c.address || '')}`);
       m.addTo(markerLayer);
       markers[c.id] = m;
