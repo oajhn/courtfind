@@ -104,7 +104,15 @@ async function resolveAreaId(city, state) {
   const res = await fetch(url, {
     headers: { 'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)' },
   });
-  const results = await res.json();
+  const rawText = await res.text();
+  let results;
+  try {
+    results = JSON.parse(rawText);
+  } catch {
+    throw new Error(
+      `Nominatim didn't return JSON (likely rate-limited from requests sent too close together): ${rawText.slice(0, 150)}. Wait about 10-15 seconds and try this city again.`
+    );
+  }
   if (!results || results.length === 0) {
     throw new Error(`Nominatim found no match for "${query}". Try adjusting the city/state spelling, or pass ?areaId= manually.`);
   }
