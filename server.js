@@ -1,6 +1,6 @@
 const path = require('path');
 const express = require('express');
-const { getCities, searchCourts, upsertCourts } = require('./db');
+const { getCities, getNeighborhoods, searchCourts, upsertCourts } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
@@ -15,12 +15,25 @@ app.get('/api/cities', async (req, res) => {
   }
 });
 
-// GET /api/courts?city=Nashville&q=park&lit=yes&minHoops=2
+// GET /api/neighborhoods?city=Nashville -> list of neighborhoods + counts for that city
+app.get('/api/neighborhoods', async (req, res) => {
+  try {
+    const { city } = req.query;
+    if (!city) return res.status(400).json({ error: 'Missing ?city=' });
+    res.json(await getNeighborhoods(city));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load neighborhoods' });
+  }
+});
+
+// GET /api/courts?city=Nashville&neighborhood=East%20Nashville&q=park&lit=yes&minHoops=2
 app.get('/api/courts', async (req, res) => {
   try {
-    const { city, q, lit, minHoops } = req.query;
+    const { city, neighborhood, q, lit, minHoops } = req.query;
     const courts = await searchCourts({
       city: city || null,
+      neighborhood: neighborhood || null,
       q: q || null,
       lit: lit || null,
       minHoops: minHoops ? Number(minHoops) : null,
@@ -45,6 +58,18 @@ function pointInPolygon(point, polygon) {
     if (intersect) inside = !inside;
   }
   return inside;
+}
+
+// Straight-line distance in miles between two lat/lng points.
+function haversineMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 async function fetchOverpass(query) {
@@ -88,7 +113,8 @@ app.get('/api/admin/import', async (req, res) => {
     `;
     const courtsData = await fetchOverpass(courtsQuery);
 
-    // 2. Fetch every named park in the same area, with full boundary geometry.
+    // 2. Fetch every named park in the area, with full boundary geometry
+    //    (used to fill in a court's name when it has none of its own).
     const parksQuery = `
       [out:json][timeout:60];
       area(${areaId})->.searchArea;
@@ -97,6 +123,21 @@ app.get('/api/admin/import', async (req, res) => {
     `;
     const parksData = await fetchOverpass(parksQuery);
     const parks = (parksData.elements || []).filter((el) => el.geometry && el.tags?.name);
+
+    // 3. Fetch neighborhood/suburb points in the area (used to label which
+    //    part of the city each court is in). Most OSM neighborhoods are
+    //    tagged as single points, not boundary polygons, so we match each
+    //    court to whichever neighborhood point is geographically closest.
+    const neighborhoodsQuery = `
+      [out:json][timeout:60];
+      area(${areaId})->.searchArea;
+      node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](area.searchArea);
+      out;
+    `;
+    const neighborhoodsData = await fetchOverpass(neighborhoodsQuery);
+    const neighborhoods = (neighborhoodsData.elements || [])
+      .filter((el) => el.lat != null && el.lon != null && el.tags?.name)
+      .map((el) => ({ name: el.tags.name, lat: el.lat, lng: el.lon }));
 
     const excluded = new Set(['private', 'no', 'customers']);
 
@@ -116,10 +157,26 @@ app.get('/api/admin/import', async (req, res) => {
           name = containingPark ? `${containingPark.tags.name} Court` : 'Unnamed Court';
         }
 
+        // Nearest neighborhood point, if any exist for this city.
+        let neighborhood = null;
+        if (neighborhoods.length > 0) {
+          let closest = null;
+          let closestDist = Infinity;
+          for (const n of neighborhoods) {
+            const d = haversineMiles(lat, lng, n.lat, n.lng);
+            if (d < closestDist) {
+              closestDist = d;
+              closest = n;
+            }
+          }
+          neighborhood = closest ? closest.name : null;
+        }
+
         return {
           osm_id: `${el.type}/${el.id}`,
           name,
           city, state,
+          neighborhood,
           address: addr || null,
           lat, lng,
           surface: tags.surface || null,
@@ -133,7 +190,13 @@ app.get('/api/admin/import', async (req, res) => {
 
     await upsertCourts(courts);
     const stillUnnamed = courts.filter((c) => c.name === 'Unnamed Court').length;
-    res.json({ imported: courts.length, city, stillUnnamed, parksFound: parks.length });
+    res.json({
+      imported: courts.length,
+      city,
+      stillUnnamed,
+      parksFound: parks.length,
+      neighborhoodsFound: neighborhoods.length,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
