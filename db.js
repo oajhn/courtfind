@@ -29,6 +29,7 @@ async function init() {
     ALTER TABLE courts ADD COLUMN IF NOT EXISTS neighborhood TEXT;
     CREATE INDEX IF NOT EXISTS idx_courts_city ON courts(city);
     CREATE INDEX IF NOT EXISTS idx_courts_neighborhood ON courts(neighborhood);
+    CREATE INDEX IF NOT EXISTS idx_courts_lat_lng ON courts(lat, lng);
   `);
 }
 const ready = init().catch((err) => {
@@ -87,7 +88,7 @@ async function getNeighborhoods(city) {
   return rows.map((r) => ({ neighborhood: r.neighborhood, count: Number(r.count) }));
 }
 
-async function searchCourts({ city, neighborhood, q, lit, minHoops }) {
+async function searchCourts({ city, neighborhood, q, lit, minHoops, bounds, limit }) {
   await ready;
   let sql = `SELECT * FROM courts WHERE 1=1`;
   const params = [];
@@ -112,10 +113,49 @@ async function searchCourts({ city, neighborhood, q, lit, minHoops }) {
     params.push(minHoops);
     sql += ` AND hoops >= $${params.length}`;
   }
+  // Map-viewport filtering: only courts currently visible on screen.
+  // `bounds` is {north, south, east, west} in degrees.
+  if (bounds) {
+    params.push(bounds.south);
+    sql += ` AND lat >= $${params.length}`;
+    params.push(bounds.north);
+    sql += ` AND lat <= $${params.length}`;
+    params.push(bounds.west);
+    sql += ` AND lng >= $${params.length}`;
+    params.push(bounds.east);
+    sql += ` AND lng <= $${params.length}`;
+  }
   sql += ` ORDER BY name`;
+
+  // Always cap results — protects the browser from trying to render
+  // thousands of markers at once when zoomed out over many cities.
+  const cap = Math.min(limit || 500, 1000);
+  params.push(cap);
+  sql += ` LIMIT $${params.length}`;
 
   const { rows } = await pool.query(sql, params);
   return rows;
 }
 
-module.exports = { upsertCourts, getCities, getNeighborhoods, searchCourts };
+async function updateCourt(id, { name, neighborhood }) {
+  await ready;
+  const fields = [];
+  const params = [];
+  if (name !== undefined) {
+    params.push(name);
+    fields.push(`name = $${params.length}`);
+  }
+  if (neighborhood !== undefined) {
+    params.push(neighborhood);
+    fields.push(`neighborhood = $${params.length}`);
+  }
+  if (fields.length === 0) return null;
+  params.push(id);
+  const { rows } = await pool.query(
+    `UPDATE courts SET ${fields.join(', ')} WHERE id = $${params.length} RETURNING *`,
+    params
+  );
+  return rows[0] || null;
+}
+
+module.exports = { upsertCourts, getCities, getNeighborhoods, searchCourts, updateCourt };
