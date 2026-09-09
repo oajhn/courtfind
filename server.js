@@ -1,14 +1,14 @@
 const path = require('path');
 const express = require('express');
-const { getCities, searchCourts } = require('./db');
+const { getCities, searchCourts, upsertCourts } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
 
 // GET /api/cities -> list of cities currently in the database + court counts
-app.get('/api/cities', (req, res) => {
+app.get('/api/cities', async (req, res) => {
   try {
-    res.json(getCities());
+    res.json(await getCities());
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load cities' });
@@ -16,10 +16,10 @@ app.get('/api/cities', (req, res) => {
 });
 
 // GET /api/courts?city=Nashville&q=park&lit=yes&minHoops=2
-app.get('/api/courts', (req, res) => {
+app.get('/api/courts', async (req, res) => {
   try {
     const { city, q, lit, minHoops } = req.query;
-    const courts = searchCourts({
+    const courts = await searchCourts({
       city: city || null,
       q: q || null,
       lit: lit || null,
@@ -64,12 +64,11 @@ async function fetchOverpass(query) {
   }
 }
 
-// One-time data import endpoint — protected by a secret key.
+// One-time (per city) data import endpoint — protected by a secret key.
 app.get('/api/admin/import', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-  const { upsertCourts } = require('./db');
   const city = req.query.city;
   const state = req.query.state || null;
   const areaId = req.query.areaId; // e.g. 3600197472 for Nashville's relation R197472
@@ -111,8 +110,6 @@ app.get('/api/admin/import', async (req, res) => {
         if (lat == null || lng == null) return null;
         const addr = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
 
-        // If the court has no name of its own, check whether it falls
-        // inside a named park's boundary and borrow that name instead.
         let name = tags.name || null;
         if (!name) {
           const containingPark = parks.find((park) => pointInPolygon({ lat, lng }, park.geometry));
@@ -134,15 +131,15 @@ app.get('/api/admin/import', async (req, res) => {
       })
       .filter(Boolean);
 
-    upsertCourts(courts);
+    await upsertCourts(courts);
     const stillUnnamed = courts.filter((c) => c.name === 'Unnamed Court').length;
     res.json({ imported: courts.length, city, stillUnnamed, parksFound: parks.length });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`CourtFinder running at http://localhost:${PORT}`);
-  console.log(`If the database is empty, run: npm run fetch-courts -- --city "Nashville"`);
 });
