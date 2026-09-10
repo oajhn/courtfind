@@ -104,11 +104,13 @@ async function fetchOverpass(query, attempt = 0) {
       throw new Error(`non-JSON response: ${rawText.slice(0, 300)}`);
     }
   } catch (err) {
+    const causeInfo = err.cause ? ` | cause: ${err.cause.code || err.cause.message || err.cause}` : '';
+    console.error(`Overpass attempt ${attempt} on ${endpoint} failed: ${err.message}${causeInfo}`);
     if (attempt < 2) {
       await sleep(1500 * (attempt + 1));
       return fetchOverpass(query, attempt + 1);
     }
-    throw new Error(`Overpass request failed after retries on both endpoints: ${err.message}`);
+    throw new Error(`Overpass request failed after retries on both endpoints: ${err.message}${causeInfo}`);
   }
 }
 
