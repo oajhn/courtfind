@@ -189,17 +189,82 @@
   .leaflet-popup-tip { background: var(--asphalt); }
   .leaflet-popup-content b { color: var(--paint-orange); }
 
-  @keyframes court-bounce {
-    0%, 100% { transform: translateY(0) scale(1); }
-    50% { transform: translateY(-7px) scale(1.03); }
+  .basketball-marker {
+    filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5));
   }
 
-  .basketball-marker {
-    animation-name: court-bounce;
-    animation-duration: 1.1s;
-    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
-    animation-iteration-count: infinite;
-    filter: drop-shadow(0 3px 3px rgba(0,0,0,0.5));
+  .details-toggle {
+    background: none;
+    border: none;
+    color: var(--paint-orange);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 6px 0 0;
+    font-family: inherit;
+  }
+
+  .details-panel {
+    margin-top: 8px;
+    padding: 10px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 6px;
+    font-size: 12.5px;
+  }
+
+  .details-panel h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #a8a39a;
+  }
+
+  .busy-buttons, .rating-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+
+  .busy-btn {
+    flex: 1;
+    min-width: 44px;
+    padding: 6px 4px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+  }
+
+  .busy-btn:hover { border-color: var(--paint-orange); }
+
+  .rating-row select {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 12.5px;
+  }
+
+  .rating-submit {
+    width: 100%;
+    padding: 7px;
+    background: var(--court-green);
+    border: none;
+    border-radius: 5px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 12.5px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .details-feedback {
+    font-size: 11.5px;
+    color: #a9d8c5;
+    margin-top: 6px;
   }
 
   @media (max-width: 720px) {
@@ -255,15 +320,19 @@
     maxZoom: 19,
   }).addTo(map);
 
+  // Transparent overlay with street/place-name labels on top of the raw
+  // satellite imagery above — gives a "hybrid" map like Google/Apple Maps'
+  // satellite mode, instead of unlabeled imagery.
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19,
+    pane: 'shadowPane', // renders above tile layers, below markers/popups
+  }).addTo(map);
+
   function makeBasketballIcon() {
-    // Slightly randomized duration/delay per marker so a cluster of courts
-    // doesn't bounce in perfect unison — reads as more alive.
-    const duration = (0.95 + Math.random() * 0.3).toFixed(2);
-    const delay = (-Math.random() * 1.2).toFixed(2); // negative delay = starts mid-cycle
     return L.divIcon({
       className: 'court-marker',
       html: `
-        <div class="basketball-marker" style="animation-duration:${duration}s; animation-delay:${delay}s; width:22px; height:22px;">
+        <div class="basketball-marker" style="width:22px; height:22px;">
           <svg viewBox="0 0 24 24" width="22" height="22">
             <circle cx="12" cy="12" r="10.2" fill="#C8631C" stroke="#3A2213" stroke-width="0.9"/>
             <path d="M12 1.8 V22.2" stroke="#3A2213" stroke-width="1"/>
@@ -278,6 +347,10 @@
       popupAnchor: [0, -12],
     });
   }
+  // Single shared icon instance — since it's no longer animated, every
+  // marker can safely reuse the same icon object instead of creating a
+  // new one per court, which cuts down on DOM/object churn at high counts.
+  const sharedBasketballIcon = makeBasketballIcon();
 
   let markers = {};
   let markerLayer = L.layerGroup().addTo(map);
@@ -401,10 +474,17 @@
           ${c.lit === 'yes' ? '<span class="tag tag-lit">Lit</span>' : ''}
           ${c.hoops ? `<span class="tag tag-hoops">${c.hoops} hoop${c.hoops > 1 ? 's' : ''}</span>` : ''}
         </div>
+        <button class="details-toggle" data-id="${c.id}">Details &amp; check in</button>
+        <div class="details-panel" id="details-${c.id}" style="display:none;"></div>
       `;
-      card.addEventListener('click', () => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.details-toggle') || e.target.closest('.details-panel')) return;
         map.flyTo([c.lat, c.lng], 16, { duration: 0.6 });
         if (markers[c.id]) markers[c.id].openPopup();
+      });
+      card.querySelector('.details-toggle').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleDetails(c.id);
       });
       els.results.appendChild(card);
     }
@@ -414,11 +494,17 @@
     markerLayer.clearLayers();
     markers = {};
     for (const c of courts) {
-      const m = L.marker([c.lat, c.lng], { icon: makeBasketballIcon() })
+      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}`;
+      const amapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(c.name)}&ll=${c.lat},${c.lng}`;
+      const m = L.marker([c.lat, c.lng], { icon: sharedBasketballIcon })
         .bindPopup(`
           <b>${escapeHtml(c.name)}</b><br>
           ${c.neighborhood ? `<span style="font-size:12px;color:#a8a39a;">${escapeHtml(c.neighborhood)}</span><br>` : ''}
           ${escapeHtml(c.address || '')}
+          <div style="margin-top:8px; display:flex; gap:10px;">
+            <a href="${gmapsUrl}" target="_blank" rel="noopener" style="color:#D6491F; font-size:12.5px; text-decoration:none;">Open in Google Maps</a>
+            <a href="${amapsUrl}" target="_blank" rel="noopener" style="color:#D6491F; font-size:12.5px; text-decoration:none;">Apple Maps</a>
+          </div>
         `);
       m.addTo(markerLayer);
       markers[c.id] = m;
@@ -434,6 +520,136 @@
     div.textContent = str || '';
     return div.innerHTML;
   }
+
+  const BUSY_LABELS = ['', 'Empty', 'Light', 'Moderate', 'Busy', 'Packed'];
+
+  function renderDetailsPanel(courtId, summary) {
+    const summaryHtml = summary
+      ? `
+        <h4>Ratings (${summary.count})</h4>
+        <p style="margin:0 0 10px; color:#cfcac1;">
+          ${summary.avgHoopQuality ? `Hoops: ${summary.avgHoopQuality.toFixed(1)}/5` : ''}
+          ${summary.commonSize ? ` &middot; Size: ${escapeHtml(summary.commonSize)}` : ''}
+          ${summary.avgCompetitionLevel ? ` &middot; Competition: ${summary.avgCompetitionLevel.toFixed(1)}/5` : ''}
+        </p>
+      `
+      : `<h4>Ratings</h4><p style="margin:0 0 10px; color:#8a8d90;">No ratings yet — be the first.</p>`;
+
+    return `
+      ${summaryHtml}
+      <h4>How busy is it right now?</h4>
+      <div class="busy-buttons">
+        ${[1, 2, 3, 4, 5].map(level => `<button class="busy-btn" data-court="${courtId}" data-level="${level}">${BUSY_LABELS[level]}</button>`).join('')}
+      </div>
+      <h4>Rate this court</h4>
+      <div class="rating-row">
+        <select class="rate-hoops" data-court="${courtId}">
+          <option value="">Hoop quality</option>
+          ${[5,4,3,2,1].map(n => `<option value="${n}">${n} / 5</option>`).join('')}
+        </select>
+      </div>
+      <div class="rating-row">
+        <select class="rate-size" data-court="${courtId}">
+          <option value="">Court size</option>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
+        </select>
+      </div>
+      <div class="rating-row">
+        <select class="rate-competition" data-court="${courtId}">
+          <option value="">Competition level</option>
+          ${[1,2,3,4,5].map(n => `<option value="${n}">${n} / 5${n===1?' (casual)':n===5?' (very competitive)':''}</option>`).join('')}
+        </select>
+      </div>
+      <button class="rating-submit" data-court="${courtId}">Submit rating</button>
+      <div class="details-feedback" id="feedback-${courtId}"></div>
+    `;
+  }
+
+  async function toggleDetails(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    if (!panel) return;
+    const isOpen = panel.style.display !== 'none';
+    if (isOpen) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+    panel.innerHTML = '<p style="color:#8a8d90;">Loading...</p>';
+    const res = await fetch(`/api/courts/${courtId}/rating-summary`);
+    const summary = await res.json();
+    panel.innerHTML = renderDetailsPanel(courtId, summary);
+  }
+
+  async function submitCheckin(courtId, busyLevel, feedbackEl) {
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const hour = now.getHours();
+    try {
+      const res = await fetch(`/api/courts/${courtId}/checkin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dayOfWeek, hour, busyLevel }),
+      });
+      if (!res.ok) throw new Error('failed');
+      feedbackEl.textContent = 'Thanks — check-in saved.';
+    } catch {
+      feedbackEl.textContent = 'Could not save check-in, try again.';
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  async function submitRating(courtId, panel, feedbackEl) {
+    const hoopQuality = panel.querySelector('.rate-hoops').value;
+    const courtSize = panel.querySelector('.rate-size').value;
+    const competitionLevel = panel.querySelector('.rate-competition').value;
+    if (!hoopQuality && !courtSize && !competitionLevel) {
+      feedbackEl.textContent = 'Pick at least one field to rate.';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/courts/${courtId}/rating`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hoopQuality: hoopQuality ? Number(hoopQuality) : null,
+          courtSize: courtSize || null,
+          competitionLevel: competitionLevel ? Number(competitionLevel) : null,
+        }),
+      });
+      if (!res.ok) throw new Error('failed');
+      feedbackEl.textContent = 'Thanks — rating saved.';
+      // Refresh the summary shown at the top of the panel.
+      const summaryRes = await fetch(`/api/courts/${courtId}/rating-summary`);
+      const summary = await summaryRes.json();
+      panel.innerHTML = renderDetailsPanel(courtId, summary);
+      document.getElementById(`feedback-${courtId}`).textContent = 'Thanks — rating saved.';
+    } catch {
+      feedbackEl.textContent = 'Could not save rating, try again.';
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  // Event delegation for details-panel buttons, since panels are rebuilt
+  // dynamically and re-binding individual listeners each time is wasteful.
+  document.getElementById('results').addEventListener('click', (e) => {
+    const busyBtn = e.target.closest('.busy-btn');
+    if (busyBtn) {
+      const courtId = busyBtn.dataset.court;
+      const level = Number(busyBtn.dataset.level);
+      const feedbackEl = document.getElementById(`feedback-${courtId}`);
+      submitCheckin(courtId, level, feedbackEl);
+      return;
+    }
+    const submitBtn = e.target.closest('.rating-submit');
+    if (submitBtn) {
+      const courtId = submitBtn.dataset.court;
+      const panel = document.getElementById(`details-${courtId}`);
+      const feedbackEl = document.getElementById(`feedback-${courtId}`);
+      submitRating(courtId, panel, feedbackEl);
+    }
+  });
 
   let debounceTimer;
   function debouncedLoad() {
