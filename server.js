@@ -77,8 +77,18 @@ function haversineMiles(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function fetchOverpass(query) {
-  const res = await fetch('https://overpass.kumi.systems/api/interpreter', {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
+async function fetchOverpass(query, attempt = 0) {
+  const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'text/plain',
@@ -90,7 +100,11 @@ async function fetchOverpass(query) {
   try {
     return JSON.parse(rawText);
   } catch {
-    throw new Error(`Overpass returned non-JSON: ${rawText.slice(0, 300)}`);
+    if (attempt < 2) {
+      await sleep(1500 * (attempt + 1));
+      return fetchOverpass(query, attempt + 1);
+    }
+    throw new Error(`Overpass returned non-JSON after retries: ${rawText.slice(0, 500)}`);
   }
 }
 
@@ -121,7 +135,6 @@ app.get('/api/admin/import', async (req, res) => {
   const radiusMeters = radiusKm * 1000;
 
   try {
-    // 1. Fetch the courts themselves.
     const courtsQuery = areaId
       ? `
         [out:json][timeout:60];
@@ -142,8 +155,6 @@ app.get('/api/admin/import', async (req, res) => {
       `;
     const courtsData = await fetchOverpass(courtsQuery);
 
-    // 2. Fetch every named park in the same scope, with full boundary
-    //    geometry (used to fill in a court's name when it has none of its own).
     const parksQuery = areaId
       ? `
         [out:json][timeout:60];
@@ -159,10 +170,6 @@ app.get('/api/admin/import', async (req, res) => {
     const parksData = await fetchOverpass(parksQuery);
     const parks = (parksData.elements || []).filter((el) => el.geometry && el.tags?.name);
 
-    // 3. Fetch neighborhood/suburb points in the same scope (used to label
-    //    which part of the city each court is in). Most OSM neighborhoods
-    //    are tagged as single points, not boundary polygons, so we match
-    //    each court to whichever neighborhood point is geographically closest.
     const neighborhoodsQuery = areaId
       ? `
         [out:json][timeout:60];
@@ -198,7 +205,6 @@ app.get('/api/admin/import', async (req, res) => {
           name = containingPark ? `${containingPark.tags.name} Court` : 'Unnamed Court';
         }
 
-        // Nearest neighborhood point, if any exist for this city.
         let neighborhood = null;
         if (neighborhoods.length > 0) {
           let closest = null;
@@ -249,7 +255,6 @@ app.get('/api/admin/import', async (req, res) => {
 
 // Manually correct a court's name or neighborhood — no shell needed.
 // Usage: /api/admin/edit-court?key=...&id=42&name=Shelby%20Park%20Court&neighborhood=East%20Nashville
-// Omit either `name` or `neighborhood` to leave that field unchanged.
 app.get('/api/admin/edit-court', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden' });
