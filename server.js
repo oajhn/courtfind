@@ -82,8 +82,8 @@ function sleep(ms) {
 }
 
 const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
 ];
 
 async function fetchOverpass(query, attempt = 0) {
