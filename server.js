@@ -88,23 +88,27 @@ const OVERPASS_ENDPOINTS = [
 
 async function fetchOverpass(query, attempt = 0) {
   const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain',
-      'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)',
-    },
-    body: query,
-  });
-  const rawText = await res.text();
   try {
-    return JSON.parse(rawText);
-  } catch {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)',
+      },
+      body: query,
+    });
+    const rawText = await res.text();
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      throw new Error(`non-JSON response: ${rawText.slice(0, 300)}`);
+    }
+  } catch (err) {
     if (attempt < 2) {
       await sleep(1500 * (attempt + 1));
       return fetchOverpass(query, attempt + 1);
     }
-    throw new Error(`Overpass returned non-JSON after retries: ${rawText.slice(0, 500)}`);
+    throw new Error(`Overpass request failed after retries on both endpoints: ${err.message}`);
   }
 }
 
