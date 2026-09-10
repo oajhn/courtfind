@@ -83,6 +83,8 @@ function sleep(ms) {
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
   'https://overpass-api.de/api/interpreter',
 ];
 
@@ -106,8 +108,8 @@ async function fetchOverpass(query, attempt = 0) {
   } catch (err) {
     const causeInfo = err.cause ? ` | cause: ${err.cause.code || err.cause.message || err.cause}` : '';
     console.error(`Overpass attempt ${attempt} on ${endpoint} failed: ${err.message}${causeInfo}`);
-    if (attempt < 2) {
-      await sleep(1500 * (attempt + 1));
+        if (attempt < OVERPASS_ENDPOINTS.length - 1) {
+      await sleep(3000);
       return fetchOverpass(query, attempt + 1);
     }
     throw new Error(`Overpass request failed after retries on both endpoints: ${err.message}${causeInfo}`);
