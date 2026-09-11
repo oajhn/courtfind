@@ -3,7 +3,13 @@ const express = require('express');
 const {
   getCities, getNeighborhoods, searchCourts, upsertCourts, updateCourt,
   addCheckin, getBusyTimes, addRating, getRatingSummary,
+  createUser, getUserByEmail, getUserByUsername, getUserById,
+  markEmailVerified, updatePassword, createAuthToken, consumeAuthToken,
+  createChallenge, respondToChallenge, getUserChallenges, getChallenge, markChallengeCompleted,
+  recordGame, getLeaderboard,
 } = require('./db');
+const { hashPassword, verifyPassword, signToken, requireAuth, randomToken } = require('./auth');
+const { sendVerificationEmail, sendPasswordResetEmail } = require('./email');
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
@@ -115,6 +121,212 @@ app.get('/api/courts/:id/rating-summary', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load rating summary' });
+  }
+});
+
+// ===================== AUTH =====================
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// POST /api/auth/signup { username, email, password }
+app.post('/api/auth/signup', express.json(), async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+    if (!USERNAME_RE.test(username || '')) {
+      return res.status(400).json({ error: 'Username must be 3-20 characters, letters/numbers/underscore only' });
+    }
+    if (!EMAIL_RE.test(email || '')) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    if (await getUserByEmail(email)) return res.status(409).json({ error: 'Email already registered' });
+    if (await getUserByUsername(username)) return res.status(409).json({ error: 'Username already taken' });
+
+    const passwordHash = await hashPassword(password);
+    const user = await createUser({ username, email, passwordHash });
+
+    const token = randomToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+    await createAuthToken(user.id, token, 'verify_email', expiresAt);
+    try {
+      await sendVerificationEmail(email, token);
+    } catch (emailErr) {
+      console.error('Failed to send verification email:', emailErr.message);
+      // User account still gets created — they just won't get the email
+      // until an admin resends it, or we add a resend endpoint later.
+    }
+
+    res.json({ created: true, message: 'Check your email to verify your account before logging in.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Signup failed' });
+  }
+});
+
+// GET /api/auth/verify-email?token=...
+app.get('/api/auth/verify-email', async (req, res) => {
+  try {
+    const userId = await consumeAuthToken(req.query.token, 'verify_email');
+    if (!userId) return res.status(400).send('Invalid or expired verification link.');
+    await markEmailVerified(userId);
+    res.send('Email verified! You can now log in.');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Something went wrong verifying your email.');
+  }
+});
+
+// POST /api/auth/login { email, password }
+app.post('/api/auth/login', express.json(), async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await getUserByEmail(email || '');
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!(await verifyPassword(password || '', user.password_hash))) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    if (!user.email_verified) {
+      return res.status(403).json({ error: 'Please verify your email before logging in' });
+    }
+    const token = signToken(user.id);
+    res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// POST /api/auth/forgot-password { email }
+app.post('/api/auth/forgot-password', express.json(), async (req, res) => {
+  try {
+    const user = await getUserByEmail(req.body.email || '');
+    // Always respond success even if the email isn't found — avoids leaking
+    // which emails are registered.
+    if (user) {
+      const token = randomToken();
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
+      await createAuthToken(user.id, token, 'reset_password', expiresAt);
+      try {
+        await sendPasswordResetEmail(user.email, token);
+      } catch (emailErr) {
+        console.error('Failed to send reset email:', emailErr.message);
+      }
+    }
+    res.json({ sent: true, message: 'If that email is registered, a reset link has been sent.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Request failed' });
+  }
+});
+
+// POST /api/auth/reset-password { token, newPassword }
+app.post('/api/auth/reset-password', express.json(), async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    const userId = await consumeAuthToken(token, 'reset_password');
+    if (!userId) return res.status(400).json({ error: 'Invalid or expired reset link' });
+    await updatePassword(userId, await hashPassword(newPassword));
+    res.json({ reset: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Reset failed' });
+  }
+});
+
+// GET /api/auth/me — current logged-in user
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  try {
+    const user = await getUserById(req.userId);
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load user' });
+  }
+});
+
+// ===================== CHALLENGES =====================
+
+// POST /api/courts/:id/challenges { opponentUsername, message }  (auth required)
+app.post('/api/courts/:id/challenges', requireAuth, express.json(), async (req, res) => {
+  try {
+    const { opponentUsername, message } = req.body;
+    const opponent = await getUserByUsername(opponentUsername || '');
+    if (!opponent) return res.status(404).json({ error: 'No user with that username' });
+    if (opponent.id === req.userId) return res.status(400).json({ error: "Can't challenge yourself" });
+    const challenge = await createChallenge({
+      courtId: req.params.id,
+      challengerId: req.userId,
+      opponentId: opponent.id,
+      message,
+    });
+    res.json({ created: true, challenge });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create challenge' });
+  }
+});
+
+// GET /api/my/challenges — challenges sent or received by the logged-in user
+app.get('/api/my/challenges', requireAuth, async (req, res) => {
+  try {
+    res.json(await getUserChallenges(req.userId));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load challenges' });
+  }
+});
+
+// POST /api/challenges/:id/respond { accept: true|false }  (must be the opponent)
+app.post('/api/challenges/:id/respond', requireAuth, express.json(), async (req, res) => {
+  try {
+    const updated = await respondToChallenge(req.params.id, req.userId, !!req.body.accept);
+    if (!updated) return res.status(404).json({ error: 'Challenge not found, not yours to respond to, or already resolved' });
+    res.json({ updated: true, challenge: updated });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to respond to challenge' });
+  }
+});
+
+// ===================== GAMES / SCORECARDS =====================
+
+// POST /api/games { courtId, challengeId?, players: [{userId, team, points}] }  (auth required)
+// Any participant can submit the final scorecard.
+app.post('/api/games', requireAuth, express.json(), async (req, res) => {
+  try {
+    const { courtId, challengeId, players } = req.body;
+    if (!courtId || !Array.isArray(players) || players.length < 2) {
+      return res.status(400).json({ error: 'courtId and at least 2 players are required' });
+    }
+    const isParticipant = players.some((p) => Number(p.userId) === req.userId);
+    if (!isParticipant) return res.status(403).json({ error: 'Only a participant can submit the scorecard' });
+    for (const p of players) {
+      if (!['A', 'B'].includes(p.team) || !Number.isInteger(Number(p.points))) {
+        return res.status(400).json({ error: 'Each player needs a team (A/B) and integer points' });
+      }
+    }
+    const game = await recordGame({ courtId, challengeId: challengeId || null, createdBy: req.userId, players });
+    if (challengeId) await markChallengeCompleted(challengeId);
+    res.json({ saved: true, game });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to record game' });
+  }
+});
+
+// GET /api/courts/:id/leaderboard — top players at this court by wins
+app.get('/api/courts/:id/leaderboard', async (req, res) => {
+  try {
+    res.json(await getLeaderboard(req.params.id));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load leaderboard' });
   }
 });
 
