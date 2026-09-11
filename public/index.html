@@ -248,7 +248,7 @@
     font-size: 12.5px;
   }
 
-  .rating-submit {
+  .rating-submit, .challenge-submit-btn {
     width: 100%;
     padding: 7px;
     background: var(--court-green);
@@ -267,6 +267,136 @@
     margin-top: 6px;
   }
 
+  .auth-widget {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    z-index: 20;
+    background: rgba(35, 37, 39, 0.94);
+    border: 1px solid rgba(240,237,230,0.12);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    backdrop-filter: blur(6px);
+  }
+
+  .auth-widget button {
+    background: none;
+    border: none;
+    color: var(--paint-orange);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 0;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-card {
+    width: 100%;
+    max-width: 340px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .modal-card h2 {
+    font-family: 'Archivo Black', sans-serif;
+    font-weight: 400;
+    font-size: 19px;
+    color: var(--paint-orange);
+    margin: 0 0 14px;
+  }
+
+  .modal-card input, .modal-card select {
+    width: 100%;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: var(--asphalt);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 6px;
+    color: var(--chalk);
+    font-family: inherit;
+    font-size: 14px;
+  }
+
+  .modal-card button.primary {
+    width: 100%;
+    padding: 10px;
+    margin-top: 4px;
+    background: var(--paint-orange);
+    border: none;
+    border-radius: 6px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .modal-card .modal-links {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #a8a39a;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .modal-card .modal-links a {
+    color: var(--paint-orange);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .modal-close {
+    float: right;
+    background: none;
+    border: none;
+    color: #a8a39a;
+    cursor: pointer;
+    font-size: 16px;
+  }
+
+  .modal-status {
+    margin-top: 10px;
+    font-size: 12.5px;
+  }
+  .modal-status.error { color: #e08a8a; }
+  .modal-status.success { color: #a9d8c5; }
+
+  .leaderboard-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12.5px;
+    border-bottom: 1px solid rgba(240,237,230,0.06);
+  }
+
+  .challenge-form input, .challenge-form select {
+    width: 100%;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-family: inherit;
+  }
+
   @media (max-width: 720px) {
     .panel { width: calc(100% - 32px); left: 16px; right: 16px; bottom: 16px; top: auto; height: 46%; }
     header { padding: 20px 20px 0; }
@@ -281,6 +411,12 @@
   <h1>CourtFinder</h1>
   <p>An index of public outdoor basketball courts.</p>
 </header>
+
+<div class="auth-widget" id="auth-widget"></div>
+
+<div class="modal-overlay" id="modal-overlay" style="display:none;">
+  <div class="modal-card" id="modal-card"></div>
+</div>
 
 <div class="panel">
   <div class="panel-head">
@@ -327,6 +463,235 @@
     maxZoom: 19,
     pane: 'shadowPane', // renders above tile layers, below markers/popups
   }).addTo(map);
+
+  // ===================== AUTH STATE & MODALS =====================
+
+  function getToken() { return localStorage.getItem('cf_token'); }
+  function getUser() {
+    const raw = localStorage.getItem('cf_user');
+    return raw ? JSON.parse(raw) : null;
+  }
+  function setSession(token, user) {
+    localStorage.setItem('cf_token', token);
+    localStorage.setItem('cf_user', JSON.stringify(user));
+    renderAuthWidget();
+  }
+  function clearSession() {
+    localStorage.removeItem('cf_token');
+    localStorage.removeItem('cf_user');
+    renderAuthWidget();
+  }
+  async function authedFetch(url, options = {}) {
+    const token = getToken();
+    return fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), 'Authorization': `Bearer ${token}` },
+    });
+  }
+
+  function renderAuthWidget() {
+    const el = document.getElementById('auth-widget');
+    const user = getUser();
+    if (user) {
+      el.innerHTML = `
+        <span style="color:#cfcac1;">${escapeHtml(user.username)}</span>
+        <button id="my-challenges-btn">Challenges</button>
+        <button id="logout-btn">Log out</button>
+      `;
+      document.getElementById('logout-btn').addEventListener('click', clearSession);
+      document.getElementById('my-challenges-btn').addEventListener('click', openMyChallengesModal);
+    } else {
+      el.innerHTML = `
+        <button id="login-btn">Log in</button>
+        <button id="signup-btn">Sign up</button>
+      `;
+      document.getElementById('login-btn').addEventListener('click', openLoginModal);
+      document.getElementById('signup-btn').addEventListener('click', openSignupModal);
+    }
+  }
+
+  function openModal(html) {
+    document.getElementById('modal-card').innerHTML = html;
+    document.getElementById('modal-overlay').style.display = 'flex';
+  }
+  function closeModal() {
+    document.getElementById('modal-overlay').style.display = 'none';
+  }
+  document.getElementById('modal-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-overlay') closeModal();
+  });
+
+  function openSignupModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Sign up</h2>
+      <input type="text" id="su-username" placeholder="Username (3-20 chars)" />
+      <input type="email" id="su-email" placeholder="Email" />
+      <input type="password" id="su-password" placeholder="Password (min 8 chars)" />
+      <button class="primary" id="su-submit">Create account</button>
+      <div class="modal-status" id="su-status"></div>
+      <div class="modal-links"><span></span><a onclick="openLoginModal()">Already have an account? Log in</a></div>
+    `);
+    document.getElementById('su-submit').addEventListener('click', async () => {
+      const username = document.getElementById('su-username').value.trim();
+      const email = document.getElementById('su-email').value.trim();
+      const password = document.getElementById('su-password').value;
+      const statusEl = document.getElementById('su-status');
+      try {
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Signup failed');
+        statusEl.textContent = data.message;
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
+      }
+    });
+  }
+
+  function openLoginModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Log in</h2>
+      <input type="email" id="li-email" placeholder="Email" />
+      <input type="password" id="li-password" placeholder="Password" />
+      <button class="primary" id="li-submit">Log in</button>
+      <div class="modal-status" id="li-status"></div>
+      <div class="modal-links">
+        <a onclick="openForgotModal()">Forgot password?</a>
+        <a onclick="openSignupModal()">Need an account?</a>
+      </div>
+    `);
+    document.getElementById('li-submit').addEventListener('click', async () => {
+      const email = document.getElementById('li-email').value.trim();
+      const password = document.getElementById('li-password').value;
+      const statusEl = document.getElementById('li-status');
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Login failed');
+        setSession(data.token, data.user);
+        closeModal();
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
+      }
+    });
+  }
+
+  function openForgotModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Reset password</h2>
+      <input type="email" id="fp-email" placeholder="Your account email" />
+      <button class="primary" id="fp-submit">Send reset link</button>
+      <div class="modal-status" id="fp-status"></div>
+    `);
+    document.getElementById('fp-submit').addEventListener('click', async () => {
+      const email = document.getElementById('fp-email').value.trim();
+      const statusEl = document.getElementById('fp-status');
+      try {
+        const res = await fetch('/api/auth/forgot-password', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json();
+        statusEl.textContent = data.message;
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = 'Something went wrong.';
+        statusEl.className = 'modal-status error';
+      }
+    });
+  }
+
+  async function openMyChallengesModal() {
+    openModal(`<button class="modal-close" onclick="closeModal()">&times;</button><h2>My challenges</h2><p style="color:#a8a39a;">Loading...</p>`);
+    const res = await authedFetch('/api/my/challenges');
+    const challenges = await res.json();
+    const user = getUser();
+    const rows = challenges.length === 0
+      ? `<p style="color:#8a8d90; font-size:13px;">No challenges yet.</p>`
+      : challenges.map(c => {
+          const isOpponent = c.opponent_id === user.id;
+          const otherUsername = isOpponent ? c.challenger_username : c.opponent_username;
+          let actionHtml = '';
+          if (c.status === 'pending' && isOpponent) {
+            actionHtml = `
+              <button onclick="respondChallenge(${c.id}, true)" style="color:#a9d8c5;">Accept</button>
+              <button onclick="respondChallenge(${c.id}, false)" style="color:#e08a8a;">Decline</button>
+            `;
+          } else if (c.status === 'accepted') {
+            actionHtml = `<button onclick="openScorecardModal(${c.id}, ${c.court_id}, '${escapeHtml(c.challenger_username)}', '${escapeHtml(c.opponent_username)}')">Submit scorecard</button>`;
+          }
+          return `
+            <div style="padding:8px 0; border-bottom:1px solid rgba(240,237,230,0.08); font-size:13px;">
+              <div>${isOpponent ? 'From' : 'To'} <b>${escapeHtml(otherUsername)}</b> at ${escapeHtml(c.court_name)}</div>
+              <div style="color:#a8a39a; font-size:11.5px;">${c.status}${c.message ? ' — "' + escapeHtml(c.message) + '"' : ''}</div>
+              <div style="margin-top:4px;">${actionHtml}</div>
+            </div>
+          `;
+        }).join('');
+    document.getElementById('modal-card').innerHTML = `
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>My challenges</h2>
+      <div style="max-height:400px; overflow-y:auto;">${rows}</div>
+    `;
+  }
+
+  async function respondChallenge(challengeId, accept) {
+    await authedFetch(`/api/challenges/${challengeId}/respond`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept }),
+    });
+    openMyChallengesModal();
+  }
+
+  function openScorecardModal(challengeId, courtId, challengerUsername, opponentUsername) {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Submit scorecard</h2>
+      <p style="font-size:12.5px; color:#a8a39a;">${escapeHtml(challengerUsername)} vs ${escapeHtml(opponentUsername)}</p>
+      <input type="number" id="sc-challenger-points" placeholder="${escapeHtml(challengerUsername)}'s points" />
+      <input type="number" id="sc-opponent-points" placeholder="${escapeHtml(opponentUsername)}'s points" />
+      <button class="primary" id="sc-submit">Submit</button>
+      <div class="modal-status" id="sc-status"></div>
+    `);
+    document.getElementById('sc-submit').addEventListener('click', async () => {
+      const statusEl = document.getElementById('sc-status');
+      try {
+        // Requires knowing both users' ids — fetched via the challenge record.
+        const challengeRes = await authedFetch('/api/my/challenges');
+        const all = await challengeRes.json();
+        const challenge = all.find(c => c.id === challengeId);
+        if (!challenge) throw new Error('Challenge not found');
+        const players = [
+          { userId: challenge.challenger_id, team: 'A', points: Number(document.getElementById('sc-challenger-points').value || 0) },
+          { userId: challenge.opponent_id, team: 'B', points: Number(document.getElementById('sc-opponent-points').value || 0) },
+        ];
+        const res = await authedFetch('/api/games', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ courtId, challengeId, players }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to submit');
+        statusEl.textContent = 'Scorecard saved!';
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
+      }
+    });
+  }
+
+  renderAuthWidget();
 
   function makeBasketballIcon() {
     return L.divIcon({
@@ -523,7 +888,7 @@
 
   const BUSY_LABELS = ['', 'Empty', 'Light', 'Moderate', 'Busy', 'Packed'];
 
-  function renderDetailsPanel(courtId, summary) {
+  async function renderDetailsPanel(courtId, summary) {
     const summaryHtml = summary
       ? `
         <h4>Ratings (${summary.count})</h4>
@@ -534,6 +899,29 @@
         </p>
       `
       : `<h4>Ratings</h4><p style="margin:0 0 10px; color:#8a8d90;">No ratings yet — be the first.</p>`;
+
+    const leaderboardRes = await fetch(`/api/courts/${courtId}/leaderboard`);
+    const leaderboard = await leaderboardRes.json();
+    const leaderboardHtml = leaderboard.length === 0
+      ? `<p style="color:#8a8d90; margin:0 0 10px;">No games recorded here yet.</p>`
+      : leaderboard.map((p, i) => `
+          <div class="leaderboard-row">
+            <span>#${i + 1} ${escapeHtml(p.username)}</span>
+            <span>${p.wins}W &middot; ${p.gamesPlayed} games</span>
+          </div>
+        `).join('');
+
+    const user = getUser();
+    const challengeHtml = user
+      ? `
+        <h4>Challenge a player</h4>
+        <div class="challenge-form">
+          <input type="text" class="challenge-opponent" data-court="${courtId}" placeholder="Opponent's username" />
+          <input type="text" class="challenge-message" data-court="${courtId}" placeholder="Message (optional)" />
+          <button class="challenge-submit-btn challenge-submit" data-court="${courtId}">Send challenge</button>
+        </div>
+      `
+      : `<h4>Challenge a player</h4><p style="color:#8a8d90; margin:0;"><a onclick="openLoginModal()" style="color:var(--paint-orange); cursor:pointer;">Log in</a> to challenge someone here.</p>`;
 
     return `
       ${summaryHtml}
@@ -564,6 +952,10 @@
       </div>
       <button class="rating-submit" data-court="${courtId}">Submit rating</button>
       <div class="details-feedback" id="feedback-${courtId}"></div>
+      <h4 style="margin-top:14px;">Leaderboard</h4>
+      ${leaderboardHtml}
+      ${challengeHtml}
+      <div class="details-feedback" id="challenge-feedback-${courtId}"></div>
     `;
   }
 
@@ -579,7 +971,7 @@
     panel.innerHTML = '<p style="color:#8a8d90;">Loading...</p>';
     const res = await fetch(`/api/courts/${courtId}/rating-summary`);
     const summary = await res.json();
-    panel.innerHTML = renderDetailsPanel(courtId, summary);
+    panel.innerHTML = await renderDetailsPanel(courtId, summary);
   }
 
   async function submitCheckin(courtId, busyLevel, feedbackEl) {
@@ -623,7 +1015,7 @@
       // Refresh the summary shown at the top of the panel.
       const summaryRes = await fetch(`/api/courts/${courtId}/rating-summary`);
       const summary = await summaryRes.json();
-      panel.innerHTML = renderDetailsPanel(courtId, summary);
+      panel.innerHTML = await renderDetailsPanel(courtId, summary);
       document.getElementById(`feedback-${courtId}`).textContent = 'Thanks — rating saved.';
     } catch {
       feedbackEl.textContent = 'Could not save rating, try again.';
@@ -648,8 +1040,39 @@
       const panel = document.getElementById(`details-${courtId}`);
       const feedbackEl = document.getElementById(`feedback-${courtId}`);
       submitRating(courtId, panel, feedbackEl);
+      return;
+    }
+    const challengeBtn = e.target.closest('.challenge-submit');
+    if (challengeBtn) {
+      const courtId = challengeBtn.dataset.court;
+      submitChallenge(courtId);
     }
   });
+
+  async function submitChallenge(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    const opponentUsername = panel.querySelector('.challenge-opponent').value.trim();
+    const message = panel.querySelector('.challenge-message').value.trim();
+    const feedbackEl = document.getElementById(`challenge-feedback-${courtId}`);
+    if (!opponentUsername) {
+      feedbackEl.textContent = 'Enter a username to challenge.';
+      feedbackEl.style.color = '#e08a8a';
+      return;
+    }
+    try {
+      const res = await authedFetch(`/api/courts/${courtId}/challenges`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ opponentUsername, message }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to send challenge');
+      feedbackEl.textContent = `Challenge sent to ${opponentUsername}!`;
+      feedbackEl.style.color = '#a9d8c5';
+    } catch (err) {
+      feedbackEl.textContent = err.message;
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
 
   let debounceTimer;
   function debouncedLoad() {
