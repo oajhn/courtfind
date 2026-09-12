@@ -73,6 +73,21 @@
     overflow: hidden;
     box-shadow: 0 20px 50px rgba(0,0,0,0.45);
     backdrop-filter: blur(6px);
+    transform: translateX(calc(-100% - 40px));
+    transition: transform 0.3s ease;
+  }
+
+  .panel.visible {
+    transform: translateX(0);
+  }
+
+  .panel-close {
+    background: none;
+    border: none;
+    color: #a8a39a;
+    font-size: 16px;
+    cursor: pointer;
+    float: right;
   }
 
   .panel-head {
@@ -473,8 +488,9 @@
   <div class="modal-card" id="modal-card"></div>
 </div>
 
-<div class="panel">
+<div class="panel" id="side-panel">
   <div class="panel-head">
+    <button class="panel-close" id="panel-close-btn">&times;</button>
     <p class="brand">Court<span>Finder</span></p>
   </div>
 
@@ -756,6 +772,10 @@
   // browser making an occasional one-off search is exactly Nominatim's
   // normal supported use case, unlike automated bulk server requests.
 
+  function showPanel() {
+    document.getElementById('side-panel').classList.add('visible');
+  }
+
   async function searchLocation() {
     const query = document.getElementById('location-search-input').value.trim();
     if (!query) return;
@@ -768,6 +788,7 @@
       }
       const { lat, lon } = results[0];
       map.flyTo([Number(lat), Number(lon)], 13, { duration: 0.8 });
+      showPanel();
     } catch {
       alert('Location search failed — try again in a moment.');
     }
@@ -781,6 +802,7 @@
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         map.flyTo([pos.coords.latitude, pos.coords.longitude], 14, { duration: 0.8 });
+        showPanel();
       },
       (err) => {
         if (err.code === err.PERMISSION_DENIED) {
@@ -797,6 +819,9 @@
     if (e.key === 'Enter') searchLocation();
   });
   document.getElementById('use-my-location-btn').addEventListener('click', useMyLocation);
+  document.getElementById('panel-close-btn').addEventListener('click', () => {
+    document.getElementById('side-panel').classList.remove('visible');
+  });
 
   function makeBasketballIcon() {
     return L.divIcon({
