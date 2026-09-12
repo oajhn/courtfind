@@ -294,6 +294,55 @@
     padding: 0;
   }
 
+  .location-search {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: rgba(35, 37, 39, 0.94);
+    border: 1px solid rgba(240,237,230,0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    backdrop-filter: blur(6px);
+  }
+
+  .location-search input {
+    width: 220px;
+    padding: 7px 10px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  .location-search button {
+    padding: 7px 10px;
+    background: var(--paint-orange);
+    border: none;
+    border-radius: 5px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .location-search #use-my-location-btn {
+    background: var(--asphalt-light);
+    padding: 7px 9px;
+  }
+
+  @media (max-width: 720px) {
+    .location-search { left: 12px; right: 12px; transform: none; top: 90px; }
+    .location-search input { flex: 1; width: auto; }
+  }
+
   .modal-overlay {
     position: fixed;
     inset: 0;
@@ -414,6 +463,12 @@
 
 <div class="auth-widget" id="auth-widget"></div>
 
+<div class="location-search">
+  <input type="text" id="location-search-input" placeholder="Search a city or address..." />
+  <button id="location-search-btn">Go</button>
+  <button id="use-my-location-btn" title="Use my location">📍</button>
+</div>
+
 <div class="modal-overlay" id="modal-overlay" style="display:none;">
   <div class="modal-card" id="modal-card"></div>
 </div>
@@ -456,12 +511,14 @@
     maxZoom: 19,
   }).addTo(map);
 
-  // Transparent overlay with street/place-name labels on top of the raw
-  // satellite imagery above — gives a "hybrid" map like Google/Apple Maps'
-  // satellite mode, instead of unlabeled imagery.
-  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+  // Labels-only overlay (place names, street names) on top of the raw
+  // satellite imagery — deliberately NOT Esri's boundary layer, since that
+  // one draws country/state border lines that look out of place over
+  // satellite imagery. This CARTO layer has labels with no border lines.
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,
     pane: 'shadowPane', // renders above tile layers, below markers/popups
+    subdomains: 'abcd',
   }).addTo(map);
 
   // ===================== AUTH STATE & MODALS =====================
@@ -692,6 +749,54 @@
   }
 
   renderAuthWidget();
+
+  // ===================== LOCATION SEARCH =====================
+  // Client-side geocoding via Nominatim. This is different from the
+  // server-side Overpass/Nominatim calls that got blocked earlier — a
+  // browser making an occasional one-off search is exactly Nominatim's
+  // normal supported use case, unlike automated bulk server requests.
+
+  async function searchLocation() {
+    const query = document.getElementById('location-search-input').value.trim();
+    if (!query) return;
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&limit=1`);
+      const results = await res.json();
+      if (!results || results.length === 0) {
+        alert(`Couldn't find "${query}" — try a different spelling or add a state.`);
+        return;
+      }
+      const { lat, lon } = results[0];
+      map.flyTo([Number(lat), Number(lon)], 13, { duration: 0.8 });
+    } catch {
+      alert('Location search failed — try again in a moment.');
+    }
+  }
+
+  function useMyLocation() {
+    if (!navigator.geolocation) {
+      alert("Your browser doesn't support location services.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        map.flyTo([pos.coords.latitude, pos.coords.longitude], 14, { duration: 0.8 });
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          alert('Location access was denied — you can still search by city/address above.');
+        } else {
+          alert("Couldn't get your location — try searching by city/address instead.");
+        }
+      }
+    );
+  }
+
+  document.getElementById('location-search-btn').addEventListener('click', searchLocation);
+  document.getElementById('location-search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchLocation();
+  });
+  document.getElementById('use-my-location-btn').addEventListener('click', useMyLocation);
 
   function makeBasketballIcon() {
     return L.divIcon({
