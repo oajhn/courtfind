@@ -5,6 +5,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle Postgres client (recovered, not fatal):', err.message);
+});
 // Run once at startup — creates the table if it doesn't exist yet,
 // and adds the neighborhood column if it's missing from an older table.
 async function init() {
