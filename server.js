@@ -1,618 +1,1331 @@
-const path = require('path');
-const express = require('express');
-const {
-  getCities, getNeighborhoods, searchCourts, upsertCourts, updateCourt, getCourtById,
-  addCheckin, getBusyTimes, addRating, getRatingSummary,
-  createUser, getUserByEmail, getUserByUsername, getUserById,
-  markEmailVerified, updatePassword, createAuthToken, consumeAuthToken,
-  createChallenge, respondToChallenge, getUserChallenges, getChallenge, markChallengeCompleted,
-  recordGame, getLeaderboard,
-} = require('./db');
-const { hashPassword, verifyPassword, signToken, requireAuth, randomToken } = require('./auth');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('./email');
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.use(express.static(path.join(__dirname, 'public')));
-
-// GET /api/cities -> list of cities currently in the database + court counts
-app.get('/api/cities', async (req, res) => {
-  try {
-    res.json(await getCities());
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load cities' });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CourtFinder — Public Outdoor Basketball Courts</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --asphalt: #232527;
+    --asphalt-light: #34373a;
+    --chalk: #F0EDE6;
+    --paint-orange: #D6491F;
+    --court-green: #29594A;
+    --line-grey: #6b6f73;
   }
-});
 
-// GET /api/neighborhoods?city=Nashville -> list of neighborhoods + counts for that city
-app.get('/api/neighborhoods', async (req, res) => {
-  try {
-    const { city } = req.query;
-    if (!city) return res.status(400).json({ error: 'Missing ?city=' });
-    res.json(await getNeighborhoods(city));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load neighborhoods' });
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--asphalt);
+    color: var(--chalk);
+    font-family: 'Inter', sans-serif;
   }
-});
 
-// GET /api/courts?city=Nashville&neighborhood=East%20Nashville&q=park&lit=yes&minHoops=2
-// or, for viewport-based loading: &north=&south=&east=&west=
-app.get('/api/courts', async (req, res) => {
-  try {
-    const { city, neighborhood, q, lit, minHoops, north, south, east, west } = req.query;
-    const bounds = (north && south && east && west)
-      ? { north: Number(north), south: Number(south), east: Number(east), west: Number(west) }
-      : null;
-    const courts = await searchCourts({
-      city: city || null,
-      neighborhood: neighborhood || null,
-      q: q || null,
-      lit: lit || null,
-      minHoops: minHoops ? Number(minHoops) : null,
-      bounds,
+  #map {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    filter: saturate(0.85) contrast(1.05);
+  }
+
+  header {
+    position: relative;
+    z-index: 10;
+    padding: 28px 32px 0;
+    pointer-events: none;
+  }
+
+  h1 {
+    font-family: 'Archivo Black', sans-serif;
+    font-weight: 400;
+    font-size: clamp(28px, 4vw, 44px);
+    margin: 0;
+    letter-spacing: -0.01em;
+    color: var(--chalk);
+    text-shadow: 0 2px 16px rgba(0,0,0,0.6);
+  }
+
+  header p {
+    margin: 6px 0 0;
+    color: #cfcac1;
+    font-size: 15px;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.6);
+  }
+
+  .panel {
+    position: fixed;
+    top: 24px;
+    left: 24px;
+    bottom: 24px;
+    width: 380px;
+    z-index: 20;
+    background: rgba(35, 37, 39, 0.94);
+    border: 1px solid rgba(240,237,230,0.12);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.45);
+    backdrop-filter: blur(6px);
+    transform: translateX(calc(-100% - 40px));
+    transition: transform 0.3s ease;
+  }
+
+  .panel.visible {
+    transform: translateX(0);
+  }
+
+  .panel-close {
+    background: none;
+    border: none;
+    color: #a8a39a;
+    font-size: 16px;
+    cursor: pointer;
+    float: right;
+  }
+
+  .panel-head {
+    padding: 20px 20px 14px;
+    border-bottom: 1px solid rgba(240,237,230,0.1);
+  }
+
+  .brand {
+    font-family: 'Archivo Black', sans-serif;
+    font-size: 20px;
+    color: var(--paint-orange);
+    margin: 0 0 2px;
+  }
+
+  .brand span { color: var(--chalk); }
+
+  .filters {
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    border-bottom: 1px solid rgba(240,237,230,0.1);
+  }
+
+  input[type="text"], select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 6px;
+    color: var(--chalk);
+    font-family: inherit;
+    font-size: 14px;
+  }
+
+  input[type="text"]::placeholder { color: #8a8d90; }
+
+  .filter-row { display: flex; gap: 8px; }
+  .filter-row select { flex: 1; }
+
+  .city-select {
+    border-left: 3px solid var(--paint-orange);
+  }
+
+  .results-count {
+    padding: 12px 20px 6px;
+    font-size: 12px;
+    color: #a8a39a;
+  }
+
+  .results {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 12px 16px;
+  }
+
+  .court-card {
+    padding: 12px 12px;
+    margin: 4px 0;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.12s ease;
+  }
+
+  .court-card:hover, .court-card.active {
+    background: var(--asphalt-light);
+    border-color: rgba(214,73,31,0.4);
+  }
+
+  .court-name {
+    font-weight: 600;
+    font-size: 14.5px;
+    margin: 0 0 4px;
+  }
+
+  .court-meta {
+    font-size: 12.5px;
+    color: #a8a39a;
+    line-height: 1.5;
+  }
+
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-right: 6px;
+    margin-top: 4px;
+  }
+
+  .tag-lit { background: rgba(41,89,74,0.5); color: #a9d8c5; }
+  .tag-hoops { background: rgba(214,73,31,0.25); color: #f0b79a; }
+
+  .empty-state {
+    padding: 30px 8px;
+    font-size: 13.5px;
+    color: #8a8d90;
+    line-height: 1.6;
+  }
+
+  .empty-state code {
+    background: var(--asphalt-light);
+    padding: 2px 5px;
+    border-radius: 4px;
+    color: var(--chalk);
+  }
+
+  .leaflet-popup-content-wrapper {
+    background: var(--asphalt);
+    color: var(--chalk);
+    border-radius: 6px;
+  }
+  .leaflet-popup-tip { background: var(--asphalt); }
+  .leaflet-popup-content b { color: var(--paint-orange); }
+
+  .basketball-marker {
+    filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5));
+  }
+
+  .details-toggle {
+    background: none;
+    border: none;
+    color: var(--paint-orange);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 6px 0 0;
+    font-family: inherit;
+  }
+
+  .details-panel {
+    margin-top: 8px;
+    padding: 10px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 6px;
+    font-size: 12.5px;
+  }
+
+  .details-panel h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #a8a39a;
+  }
+
+  .busy-buttons, .rating-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+
+  .busy-btn {
+    flex: 1;
+    min-width: 44px;
+    padding: 6px 4px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+  }
+
+  .busy-btn:hover { border-color: var(--paint-orange); }
+
+  .rating-row select {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 12.5px;
+  }
+
+  .rating-submit, .challenge-submit-btn {
+    width: 100%;
+    padding: 7px;
+    background: var(--court-green);
+    border: none;
+    border-radius: 5px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 12.5px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .details-feedback {
+    font-size: 11.5px;
+    color: #a9d8c5;
+    margin-top: 6px;
+  }
+
+  .auth-widget {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    z-index: 20;
+    background: rgba(35, 37, 39, 0.94);
+    border: 1px solid rgba(240,237,230,0.12);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    backdrop-filter: blur(6px);
+  }
+
+  .auth-widget button {
+    background: none;
+    border: none;
+    color: var(--paint-orange);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 0;
+  }
+
+  .location-search {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: rgba(35, 37, 39, 0.94);
+    border: 1px solid rgba(240,237,230,0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    backdrop-filter: blur(6px);
+  }
+
+  .location-search input {
+    width: 220px;
+    padding: 7px 10px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  .location-search button {
+    padding: 7px 10px;
+    background: var(--paint-orange);
+    border: none;
+    border-radius: 5px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .location-search #use-my-location-btn {
+    background: var(--asphalt-light);
+    padding: 7px 9px;
+  }
+
+  @media (max-width: 720px) {
+    .location-search { left: 12px; right: 12px; transform: none; top: 90px; }
+    .location-search input { flex: 1; width: auto; }
+  }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-card {
+    width: 100%;
+    max-width: 340px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .modal-card h2 {
+    font-family: 'Archivo Black', sans-serif;
+    font-weight: 400;
+    font-size: 19px;
+    color: var(--paint-orange);
+    margin: 0 0 14px;
+  }
+
+  .modal-card input, .modal-card select {
+    width: 100%;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: var(--asphalt);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 6px;
+    color: var(--chalk);
+    font-family: inherit;
+    font-size: 14px;
+  }
+
+  .modal-card button.primary {
+    width: 100%;
+    padding: 10px;
+    margin-top: 4px;
+    background: var(--paint-orange);
+    border: none;
+    border-radius: 6px;
+    color: var(--chalk);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .modal-card .modal-links {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #a8a39a;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .modal-card .modal-links a {
+    color: var(--paint-orange);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .modal-close {
+    float: right;
+    background: none;
+    border: none;
+    color: #a8a39a;
+    cursor: pointer;
+    font-size: 16px;
+  }
+
+  .modal-status {
+    margin-top: 10px;
+    font-size: 12.5px;
+  }
+  .modal-status.error { color: #e08a8a; }
+  .modal-status.success { color: #a9d8c5; }
+
+  .leaderboard-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12.5px;
+    border-bottom: 1px solid rgba(240,237,230,0.06);
+  }
+
+  .challenge-form input, .challenge-form select {
+    width: 100%;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    background: var(--asphalt-light);
+    border: 1px solid rgba(240,237,230,0.15);
+    border-radius: 5px;
+    color: var(--chalk);
+    font-family: inherit;
+  }
+
+  @media (max-width: 720px) {
+    .panel { width: calc(100% - 32px); left: 16px; right: 16px; bottom: 16px; top: auto; height: 46%; }
+    header { padding: 20px 20px 0; }
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<header>
+  <h1>CourtFinder</h1>
+  <p>An index of public outdoor basketball courts.</p>
+</header>
+
+<div class="auth-widget" id="auth-widget"></div>
+
+<div class="location-search">
+  <input type="text" id="location-search-input" placeholder="Search a city or address..." />
+  <button id="location-search-btn">Go</button>
+  <button id="use-my-location-btn" title="Use my location">📍</button>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" style="display:none;">
+  <div class="modal-card" id="modal-card"></div>
+</div>
+
+<div class="panel" id="side-panel">
+  <div class="panel-head">
+    <button class="panel-close" id="panel-close-btn">&times;</button>
+    <p class="brand">Court<span>Finder</span></p>
+  </div>
+
+  <div class="filters">
+    <input type="text" id="search" placeholder="Search by court name or street..." />
+    <div class="filter-row">
+      <select id="city-filter" class="city-select">
+        <option value="">All cities</option>
+      </select>
+      <select id="lit-filter">
+        <option value="">Any lighting</option>
+        <option value="yes">Lit at night</option>
+        <option value="no">Not lit</option>
+      </select>
+    </div>
+    <div class="filter-row">
+      <select id="neighborhood-filter">
+        <option value="">All areas</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="results-count" id="results-count">Loading courts…</div>
+  <div class="results" id="results"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script>
+  const map = L.map('map', { zoomControl: false }).setView([36.1627, -86.7816], 12); // default: Nashville
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // Labels-only overlay (place names, street names) on top of the raw
+  // satellite imagery — deliberately NOT Esri's boundary layer, since that
+  // one draws country/state border lines that look out of place over
+  // satellite imagery. This CARTO layer has labels with no border lines.
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19,
+    pane: 'shadowPane', // renders above tile layers, below markers/popups
+    subdomains: 'abcd',
+  }).addTo(map);
+
+  // ===================== AUTH STATE & MODALS =====================
+
+  function getToken() { return localStorage.getItem('cf_token'); }
+  function getUser() {
+    const raw = localStorage.getItem('cf_user');
+    return raw ? JSON.parse(raw) : null;
+  }
+  function setSession(token, user) {
+    localStorage.setItem('cf_token', token);
+    localStorage.setItem('cf_user', JSON.stringify(user));
+    renderAuthWidget();
+  }
+  function clearSession() {
+    localStorage.removeItem('cf_token');
+    localStorage.removeItem('cf_user');
+    renderAuthWidget();
+  }
+  async function authedFetch(url, options = {}) {
+    const token = getToken();
+    return fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), 'Authorization': `Bearer ${token}` },
     });
-    res.json(courts);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load courts' });
   }
-});
 
-// GET /api/courts/:id -> a single court's full record
-app.get('/api/courts/:id', async (req, res) => {
-  try {
-    const court = await getCourtById(req.params.id);
-    if (!court) return res.status(404).json({ error: 'Court not found' });
-    res.json(court);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load court' });
-  }
-});
-
-// POST /api/courts/:id/suggest-name  { name }
-// Public, no auth — but only works on courts that are still unnamed, so
-// this can't be used to overwrite a court that already has a real name
-// (that stays admin-only, via /api/admin/edit-court, to avoid vandalism
-// of legitimate names).
-app.post('/api/courts/:id/suggest-name', express.json(), async (req, res) => {
-  try {
-    const court = await getCourtById(req.params.id);
-    if (!court) return res.status(404).json({ error: 'Court not found' });
-    if (court.name !== 'Unnamed Court') {
-      return res.status(400).json({ error: 'This court already has a name — name suggestions are only for unnamed courts' });
-    }
-    const name = (req.body.name || '').trim();
-    if (!name || name.length < 2 || name.length > 60) {
-      return res.status(400).json({ error: 'Name must be 2-60 characters' });
-    }
-    const updated = await updateCourt(req.params.id, { name });
-    res.json({ updated: true, court: updated });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to save name suggestion' });
-  }
-});
-
-// POST /api/courts/:id/checkin  { dayOfWeek: 0-6, hour: 0-23, busyLevel: 1-5 }
-app.post('/api/courts/:id/checkin', express.json(), async (req, res) => {
-  try {
-    const { dayOfWeek, hour, busyLevel } = req.body;
-    if (
-      !Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6 ||
-      !Number.isInteger(hour) || hour < 0 || hour > 23 ||
-      !Number.isInteger(busyLevel) || busyLevel < 1 || busyLevel > 5
-    ) {
-      return res.status(400).json({ error: 'dayOfWeek (0-6), hour (0-23), and busyLevel (1-5) are required' });
-    }
-    const checkin = await addCheckin(req.params.id, { dayOfWeek, hour, busyLevel });
-    res.json({ saved: true, checkin });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to save check-in' });
-  }
-});
-
-// GET /api/courts/:id/busy-times -> array of {dayOfWeek, hour, avgBusy, count}
-app.get('/api/courts/:id/busy-times', async (req, res) => {
-  try {
-    res.json(await getBusyTimes(req.params.id));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load busy times' });
-  }
-});
-
-// POST /api/courts/:id/rating  { hoopQuality: 1-5, courtSize: 'small'|'medium'|'large', competitionLevel: 1-5 }
-// All three fields are optional individually, but at least one is required.
-app.post('/api/courts/:id/rating', express.json(), async (req, res) => {
-  try {
-    const { hoopQuality, courtSize, competitionLevel } = req.body;
-    const validSizes = new Set(['small', 'medium', 'large']);
-    if (hoopQuality != null && (!Number.isInteger(hoopQuality) || hoopQuality < 1 || hoopQuality > 5)) {
-      return res.status(400).json({ error: 'hoopQuality must be an integer 1-5' });
-    }
-    if (competitionLevel != null && (!Number.isInteger(competitionLevel) || competitionLevel < 1 || competitionLevel > 5)) {
-      return res.status(400).json({ error: 'competitionLevel must be an integer 1-5' });
-    }
-    if (courtSize != null && !validSizes.has(courtSize)) {
-      return res.status(400).json({ error: 'courtSize must be small, medium, or large' });
-    }
-    if (hoopQuality == null && courtSize == null && competitionLevel == null) {
-      return res.status(400).json({ error: 'Provide at least one of hoopQuality, courtSize, competitionLevel' });
-    }
-    const rating = await addRating(req.params.id, { hoopQuality, courtSize, competitionLevel });
-    res.json({ saved: true, rating });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to save rating' });
-  }
-});
-
-// GET /api/courts/:id/rating-summary -> {avgHoopQuality, avgCompetitionLevel, commonSize, count} or null
-app.get('/api/courts/:id/rating-summary', async (req, res) => {
-  try {
-    res.json(await getRatingSummary(req.params.id));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load rating summary' });
-  }
-});
-
-// ===================== AUTH =====================
-
-const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-// POST /api/auth/signup { username, email, password }
-app.post('/api/auth/signup', express.json(), async (req, res) => {
-  try {
-    const { username, email, password } = req.body;
-    if (!USERNAME_RE.test(username || '')) {
-      return res.status(400).json({ error: 'Username must be 3-20 characters, letters/numbers/underscore only' });
-    }
-    if (!EMAIL_RE.test(email || '')) {
-      return res.status(400).json({ error: 'Invalid email address' });
-    }
-    if (!password || password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
-    if (await getUserByEmail(email)) return res.status(409).json({ error: 'Email already registered' });
-    if (await getUserByUsername(username)) return res.status(409).json({ error: 'Username already taken' });
-
-    const passwordHash = await hashPassword(password);
-    const user = await createUser({ username, email, passwordHash });
-
-    const token = randomToken();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-    await createAuthToken(user.id, token, 'verify_email', expiresAt);
-    try {
-      await sendVerificationEmail(email, token);
-    } catch (emailErr) {
-      console.error('Failed to send verification email:', emailErr.message);
-      // User account still gets created — they just won't get the email
-      // until an admin resends it, or we add a resend endpoint later.
-    }
-
-    res.json({ created: true, message: 'Check your email to verify your account before logging in.' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Signup failed' });
-  }
-});
-
-// GET /api/auth/verify-email?token=...
-app.get('/api/auth/verify-email', async (req, res) => {
-  try {
-    const userId = await consumeAuthToken(req.query.token, 'verify_email');
-    if (!userId) return res.status(400).send('Invalid or expired verification link.');
-    await markEmailVerified(userId);
-    res.send('Email verified! You can now log in.');
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Something went wrong verifying your email.');
-  }
-});
-
-// POST /api/auth/login { email, password }
-app.post('/api/auth/login', express.json(), async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await getUserByEmail(email || '');
-    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-    if (!(await verifyPassword(password || '', user.password_hash))) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    if (!user.email_verified) {
-      return res.status(403).json({ error: 'Please verify your email before logging in' });
-    }
-    const token = signToken(user.id);
-    res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Login failed' });
-  }
-});
-
-// POST /api/auth/forgot-password { email }
-app.post('/api/auth/forgot-password', express.json(), async (req, res) => {
-  try {
-    const user = await getUserByEmail(req.body.email || '');
-    // Always respond success even if the email isn't found — avoids leaking
-    // which emails are registered.
+  function renderAuthWidget() {
+    const el = document.getElementById('auth-widget');
+    const user = getUser();
     if (user) {
-      const token = randomToken();
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
-      await createAuthToken(user.id, token, 'reset_password', expiresAt);
+      el.innerHTML = `
+        <span style="color:#cfcac1;">${escapeHtml(user.username)}</span>
+        <button id="my-challenges-btn">Challenges</button>
+        <button id="logout-btn">Log out</button>
+      `;
+      document.getElementById('logout-btn').addEventListener('click', clearSession);
+      document.getElementById('my-challenges-btn').addEventListener('click', openMyChallengesModal);
+    } else {
+      el.innerHTML = `
+        <button id="login-btn">Log in</button>
+        <button id="signup-btn">Sign up</button>
+      `;
+      document.getElementById('login-btn').addEventListener('click', openLoginModal);
+      document.getElementById('signup-btn').addEventListener('click', openSignupModal);
+    }
+  }
+
+  function openModal(html) {
+    document.getElementById('modal-card').innerHTML = html;
+    document.getElementById('modal-overlay').style.display = 'flex';
+  }
+  function closeModal() {
+    document.getElementById('modal-overlay').style.display = 'none';
+  }
+  document.getElementById('modal-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-overlay') closeModal();
+  });
+
+  function openSignupModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Sign up</h2>
+      <input type="text" id="su-username" placeholder="Username (3-20 chars)" />
+      <input type="email" id="su-email" placeholder="Email" />
+      <input type="password" id="su-password" placeholder="Password (min 8 chars)" />
+      <button class="primary" id="su-submit">Create account</button>
+      <div class="modal-status" id="su-status"></div>
+      <div class="modal-links"><span></span><a onclick="openLoginModal()">Already have an account? Log in</a></div>
+    `);
+    document.getElementById('su-submit').addEventListener('click', async () => {
+      const username = document.getElementById('su-username').value.trim();
+      const email = document.getElementById('su-email').value.trim();
+      const password = document.getElementById('su-password').value;
+      const statusEl = document.getElementById('su-status');
       try {
-        await sendPasswordResetEmail(user.email, token);
-      } catch (emailErr) {
-        console.error('Failed to send reset email:', emailErr.message);
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Signup failed');
+        statusEl.textContent = data.message;
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
       }
-    }
-    res.json({ sent: true, message: 'If that email is registered, a reset link has been sent.' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Request failed' });
-  }
-});
-
-// POST /api/auth/reset-password { token, newPassword }
-app.post('/api/auth/reset-password', express.json(), async (req, res) => {
-  try {
-    const { token, newPassword } = req.body;
-    if (!newPassword || newPassword.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
-    const userId = await consumeAuthToken(token, 'reset_password');
-    if (!userId) return res.status(400).json({ error: 'Invalid or expired reset link' });
-    await updatePassword(userId, await hashPassword(newPassword));
-    res.json({ reset: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Reset failed' });
-  }
-});
-
-// GET /api/auth/me — current logged-in user
-app.get('/api/auth/me', requireAuth, async (req, res) => {
-  try {
-    const user = await getUserById(req.userId);
-    res.json(user);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load user' });
-  }
-});
-
-// ===================== CHALLENGES =====================
-
-// POST /api/courts/:id/challenges { opponentUsername, message }  (auth required)
-app.post('/api/courts/:id/challenges', requireAuth, express.json(), async (req, res) => {
-  try {
-    const { opponentUsername, message } = req.body;
-    const opponent = await getUserByUsername(opponentUsername || '');
-    if (!opponent) return res.status(404).json({ error: 'No user with that username' });
-    if (opponent.id === req.userId) return res.status(400).json({ error: "Can't challenge yourself" });
-    const challenge = await createChallenge({
-      courtId: req.params.id,
-      challengerId: req.userId,
-      opponentId: opponent.id,
-      message,
     });
-    res.json({ created: true, challenge });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to create challenge' });
   }
-});
 
-// GET /api/my/challenges — challenges sent or received by the logged-in user
-app.get('/api/my/challenges', requireAuth, async (req, res) => {
-  try {
-    res.json(await getUserChallenges(req.userId));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load challenges' });
-  }
-});
-
-// POST /api/challenges/:id/respond { accept: true|false }  (must be the opponent)
-app.post('/api/challenges/:id/respond', requireAuth, express.json(), async (req, res) => {
-  try {
-    const updated = await respondToChallenge(req.params.id, req.userId, !!req.body.accept);
-    if (!updated) return res.status(404).json({ error: 'Challenge not found, not yours to respond to, or already resolved' });
-    res.json({ updated: true, challenge: updated });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to respond to challenge' });
-  }
-});
-
-// ===================== GAMES / SCORECARDS =====================
-
-// POST /api/games { courtId, challengeId?, players: [{userId, team, points}] }  (auth required)
-// Any participant can submit the final scorecard.
-app.post('/api/games', requireAuth, express.json(), async (req, res) => {
-  try {
-    const { courtId, challengeId, players } = req.body;
-    if (!courtId || !Array.isArray(players) || players.length < 2) {
-      return res.status(400).json({ error: 'courtId and at least 2 players are required' });
-    }
-    const isParticipant = players.some((p) => Number(p.userId) === req.userId);
-    if (!isParticipant) return res.status(403).json({ error: 'Only a participant can submit the scorecard' });
-    for (const p of players) {
-      if (!['A', 'B'].includes(p.team) || !Number.isInteger(Number(p.points))) {
-        return res.status(400).json({ error: 'Each player needs a team (A/B) and integer points' });
+  function openLoginModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Log in</h2>
+      <input type="email" id="li-email" placeholder="Email" />
+      <input type="password" id="li-password" placeholder="Password" />
+      <button class="primary" id="li-submit">Log in</button>
+      <div class="modal-status" id="li-status"></div>
+      <div class="modal-links">
+        <a onclick="openForgotModal()">Forgot password?</a>
+        <a onclick="openSignupModal()">Need an account?</a>
+      </div>
+    `);
+    document.getElementById('li-submit').addEventListener('click', async () => {
+      const email = document.getElementById('li-email').value.trim();
+      const password = document.getElementById('li-password').value;
+      const statusEl = document.getElementById('li-status');
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Login failed');
+        setSession(data.token, data.user);
+        closeModal();
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
       }
-    }
-    const game = await recordGame({ courtId, challengeId: challengeId || null, createdBy: req.userId, players });
-    if (challengeId) await markChallengeCompleted(challengeId);
-    res.json({ saved: true, game });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to record game' });
-  }
-});
-
-// GET /api/courts/:id/leaderboard — top players at this court by wins
-app.get('/api/courts/:id/leaderboard', async (req, res) => {
-  try {
-    res.json(await getLeaderboard(req.params.id));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load leaderboard' });
-  }
-});
-
-// Ray-casting point-in-polygon test. `point` is {lat, lng}, `polygon` is
-// an array of {lat, lon} vertices from Overpass's "out geom" output.
-function pointInPolygon(point, polygon) {
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i].lon, yi = polygon[i].lat;
-    const xj = polygon[j].lon, yj = polygon[j].lat;
-    const intersect =
-      (yi > point.lat) !== (yj > point.lat) &&
-      point.lng < ((xj - xi) * (point.lat - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-// Straight-line distance in miles between two lat/lng points.
-function haversineMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-const OVERPASS_ENDPOINTS = [
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-  'https://overpass.osm.ch/api/interpreter',
-  'https://overpass-api.de/api/interpreter',
-];
-
-async function fetchOverpass(query, attempt = 0) {
-  const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain',
-        'User-Agent': 'CourtFinder/1.0 (contact: your-email@example.com)',
-      },
-      body: query,
     });
-    const rawText = await res.text();
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      throw new Error(`non-JSON response: ${rawText.slice(0, 300)}`);
-    }
-  } catch (err) {
-    // Covers both network-level failures (DNS, connection refused, timeout)
-    // and non-JSON responses (busy/throttled server) — retry on the other
-    // endpoint with a short backoff, up to 3 total attempts.
-    const causeInfo = err.cause ? ` | cause: ${err.cause.code || err.cause.message || err.cause}` : '';
-    console.error(`Overpass attempt ${attempt} on ${endpoint} failed: ${err.message}${causeInfo}`);
-    if (attempt < OVERPASS_ENDPOINTS.length - 1) {
-      await sleep(3000);
-      return fetchOverpass(query, attempt + 1);
-    }
-    throw new Error(`Overpass request failed after retries on both endpoints: ${err.message}${causeInfo}`);
-  }
-}
-
-// One-time (per city) data import endpoint — protected by a secret key.
-// Two ways to scope the query area:
-//   1. Radius mode (recommended, no external lookup needed):
-//      ?lat=36.1627&lng=-86.7816&radiusKm=20
-//   2. Admin-boundary mode (tighter fit to city limits, needs a known OSM
-//      relation id — see openstreetmap.org, search the city, relation id is
-//      in the URL): ?areaId=3600197472
-app.get('/api/admin/import', async (req, res) => {
-  if (req.query.key !== process.env.ADMIN_KEY) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  const city = req.query.city;
-  const state = req.query.state || null;
-  if (!city) return res.status(400).json({ error: 'Missing ?city=' });
-
-  const areaId = req.query.areaId || null;
-  const lat = req.query.lat ? Number(req.query.lat) : null;
-  const lng = req.query.lng ? Number(req.query.lng) : null;
-  const radiusKm = req.query.radiusKm ? Number(req.query.radiusKm) : 20;
-
-  if (!areaId && (lat == null || lng == null)) {
-    return res.status(400).json({ error: 'Provide either ?areaId= (admin boundary) or ?lat=&lng= (radius mode)' });
   }
 
-  const radiusMeters = radiusKm * 1000;
+  function openForgotModal() {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Reset password</h2>
+      <input type="email" id="fp-email" placeholder="Your account email" />
+      <button class="primary" id="fp-submit">Send reset link</button>
+      <div class="modal-status" id="fp-status"></div>
+    `);
+    document.getElementById('fp-submit').addEventListener('click', async () => {
+      const email = document.getElementById('fp-email').value.trim();
+      const statusEl = document.getElementById('fp-status');
+      try {
+        const res = await fetch('/api/auth/forgot-password', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json();
+        statusEl.textContent = data.message;
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = 'Something went wrong.';
+        statusEl.className = 'modal-status error';
+      }
+    });
+  }
 
-  try {
-    // 1. Fetch the courts themselves.
-    const courtsQuery = areaId
-      ? `
-        [out:json][timeout:60];
-        area(${areaId})->.searchArea;
-        (
-          node["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-          way["leisure"="pitch"]["sport"="basketball"](area.searchArea);
-        );
-        out center tags;
-      `
-      : `
-        [out:json][timeout:60];
-        (
-          node["leisure"="pitch"]["sport"="basketball"](around:${radiusMeters},${lat},${lng});
-          way["leisure"="pitch"]["sport"="basketball"](around:${radiusMeters},${lat},${lng});
-        );
-        out center tags;
-      `;
-    const courtsData = await fetchOverpass(courtsQuery);
-
-    // 2. Fetch every named park in the same scope, with full boundary
-    //    geometry (used to fill in a court's name when it has none of its own).
-    const parksQuery = areaId
-      ? `
-        [out:json][timeout:60];
-        area(${areaId})->.searchArea;
-        way["leisure"="park"]["name"](area.searchArea);
-        out geom;
-      `
-      : `
-        [out:json][timeout:60];
-        way["leisure"="park"]["name"](around:${radiusMeters},${lat},${lng});
-        out geom;
-      `;
-    const parksData = await fetchOverpass(parksQuery);
-    const parks = (parksData.elements || []).filter((el) => el.geometry && el.tags?.name);
-
-    // 3. Fetch neighborhood/suburb points in the same scope (used to label
-    //    which part of the city each court is in). Most OSM neighborhoods
-    //    are tagged as single points, not boundary polygons, so we match
-    //    each court to whichever neighborhood point is geographically closest.
-    const neighborhoodsQuery = areaId
-      ? `
-        [out:json][timeout:60];
-        area(${areaId})->.searchArea;
-        node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](area.searchArea);
-        out;
-      `
-      : `
-        [out:json][timeout:60];
-        node["place"~"^(suburb|neighbourhood|quarter)$"]["name"](around:${radiusMeters},${lat},${lng});
-        out;
-      `;
-    const neighborhoodsData = await fetchOverpass(neighborhoodsQuery);
-    const neighborhoods = (neighborhoodsData.elements || [])
-      .filter((el) => el.lat != null && el.lon != null && el.tags?.name)
-      .map((el) => ({ name: el.tags.name, lat: el.lat, lng: el.lon }));
-
-    const excluded = new Set(['private', 'no', 'customers']);
-
-    const courts = (courtsData.elements || [])
-      .map((el) => {
-        const tags = el.tags || {};
-        const access = (tags.access || 'unknown').toLowerCase();
-        if (excluded.has(access)) return null;
-        const lat = el.lat ?? el.center?.lat;
-        const lng = el.lon ?? el.center?.lon;
-        if (lat == null || lng == null) return null;
-        const addr = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
-
-        let name = tags.name || null;
-        if (!name) {
-          const containingPark = parks.find((park) => pointInPolygon({ lat, lng }, park.geometry));
-          name = containingPark ? `${containingPark.tags.name} Court` : 'Unnamed Court';
-        }
-
-        // Nearest neighborhood point, if any exist for this city.
-        let neighborhood = null;
-        if (neighborhoods.length > 0) {
-          let closest = null;
-          let closestDist = Infinity;
-          for (const n of neighborhoods) {
-            const d = haversineMiles(lat, lng, n.lat, n.lng);
-            if (d < closestDist) {
-              closestDist = d;
-              closest = n;
-            }
+  async function openMyChallengesModal() {
+    openModal(`<button class="modal-close" onclick="closeModal()">&times;</button><h2>My challenges</h2><p style="color:#a8a39a;">Loading...</p>`);
+    const res = await authedFetch('/api/my/challenges');
+    const challenges = await res.json();
+    const user = getUser();
+    const rows = challenges.length === 0
+      ? `<p style="color:#8a8d90; font-size:13px;">No challenges yet.</p>`
+      : challenges.map(c => {
+          const isOpponent = c.opponent_id === user.id;
+          const otherUsername = isOpponent ? c.challenger_username : c.opponent_username;
+          let actionHtml = '';
+          if (c.status === 'pending' && isOpponent) {
+            actionHtml = `
+              <button onclick="respondChallenge(${c.id}, true)" style="color:#a9d8c5;">Accept</button>
+              <button onclick="respondChallenge(${c.id}, false)" style="color:#e08a8a;">Decline</button>
+            `;
+          } else if (c.status === 'accepted') {
+            actionHtml = `<button onclick="openScorecardModal(${c.id}, ${c.court_id}, '${escapeHtml(c.challenger_username)}', '${escapeHtml(c.opponent_username)}')">Submit scorecard</button>`;
           }
-          neighborhood = closest ? closest.name : null;
-        }
+          return `
+            <div style="padding:8px 0; border-bottom:1px solid rgba(240,237,230,0.08); font-size:13px;">
+              <div>${isOpponent ? 'From' : 'To'} <b>${escapeHtml(otherUsername)}</b> at ${escapeHtml(c.court_name)}</div>
+              <div style="color:#a8a39a; font-size:11.5px;">${c.status}${c.message ? ' — "' + escapeHtml(c.message) + '"' : ''}</div>
+              <div style="margin-top:4px;">${actionHtml}</div>
+            </div>
+          `;
+        }).join('');
+    document.getElementById('modal-card').innerHTML = `
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>My challenges</h2>
+      <div style="max-height:400px; overflow-y:auto;">${rows}</div>
+    `;
+  }
 
-        return {
-          osm_id: `${el.type}/${el.id}`,
-          name,
-          city, state,
-          neighborhood,
-          address: addr || null,
-          lat, lng,
-          surface: tags.surface || null,
-          hoops: tags.hoops ? parseInt(tags.hoops, 10) : null,
-          lit: tags.lit || 'unknown',
-          access,
-          source: 'openstreetmap',
-        };
-      })
-      .filter(Boolean);
-
-    await upsertCourts(courts);
-    const stillUnnamed = courts.filter((c) => c.name === 'Unnamed Court').length;
-    res.json({
-      imported: courts.length,
-      city,
-      mode: areaId ? 'areaId' : 'radius',
-      areaId: areaId || undefined,
-      radiusKm: areaId ? undefined : radiusKm,
-      stillUnnamed,
-      parksFound: parks.length,
-      neighborhoodsFound: neighborhoods.length,
+  async function respondChallenge(challengeId, accept) {
+    await authedFetch(`/api/challenges/${challengeId}/respond`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accept }),
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    openMyChallengesModal();
   }
-});
 
-// Manually correct a court's name or neighborhood — no shell needed.
-// Usage: /api/admin/edit-court?key=...&id=42&name=Shelby%20Park%20Court&neighborhood=East%20Nashville
-// Omit either `name` or `neighborhood` to leave that field unchanged.
-app.get('/api/admin/edit-court', async (req, res) => {
-  if (req.query.key !== process.env.ADMIN_KEY) {
-    return res.status(403).json({ error: 'Forbidden' });
+  function openScorecardModal(challengeId, courtId, challengerUsername, opponentUsername) {
+    openModal(`
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <h2>Submit scorecard</h2>
+      <p style="font-size:12.5px; color:#a8a39a;">${escapeHtml(challengerUsername)} vs ${escapeHtml(opponentUsername)}</p>
+      <input type="number" id="sc-challenger-points" placeholder="${escapeHtml(challengerUsername)}'s points" />
+      <input type="number" id="sc-opponent-points" placeholder="${escapeHtml(opponentUsername)}'s points" />
+      <button class="primary" id="sc-submit">Submit</button>
+      <div class="modal-status" id="sc-status"></div>
+    `);
+    document.getElementById('sc-submit').addEventListener('click', async () => {
+      const statusEl = document.getElementById('sc-status');
+      try {
+        // Requires knowing both users' ids — fetched via the challenge record.
+        const challengeRes = await authedFetch('/api/my/challenges');
+        const all = await challengeRes.json();
+        const challenge = all.find(c => c.id === challengeId);
+        if (!challenge) throw new Error('Challenge not found');
+        const players = [
+          { userId: challenge.challenger_id, team: 'A', points: Number(document.getElementById('sc-challenger-points').value || 0) },
+          { userId: challenge.opponent_id, team: 'B', points: Number(document.getElementById('sc-opponent-points').value || 0) },
+        ];
+        const res = await authedFetch('/api/games', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ courtId, challengeId, players }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to submit');
+        statusEl.textContent = 'Scorecard saved!';
+        statusEl.className = 'modal-status success';
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'modal-status error';
+      }
+    });
   }
-  const id = req.query.id;
-  if (!id) return res.status(400).json({ error: 'Missing ?id=' });
-  const updates = {};
-  if (req.query.name !== undefined) updates.name = req.query.name;
-  if (req.query.neighborhood !== undefined) updates.neighborhood = req.query.neighborhood;
-  if (Object.keys(updates).length === 0) {
-    return res.status(400).json({ error: 'Provide ?name= and/or ?neighborhood= to update' });
-  }
-  try {
-    const updated = await updateCourt(id, updates);
-    if (!updated) return res.status(404).json({ error: 'No court found with that id' });
-    res.json({ updated: true, court: updated });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
-app.listen(PORT, () => {
-  console.log(`CourtFinder running at http://localhost:${PORT}`);
-});
+  renderAuthWidget();
+
+  // ===================== LOCATION SEARCH =====================
+  // Client-side geocoding via Nominatim. This is different from the
+  // server-side Overpass/Nominatim calls that got blocked earlier — a
+  // browser making an occasional one-off search is exactly Nominatim's
+  // normal supported use case, unlike automated bulk server requests.
+
+  function showPanel() {
+    document.getElementById('side-panel').classList.add('visible');
+  }
+
+  async function searchLocation() {
+    const query = document.getElementById('location-search-input').value.trim();
+    if (!query) return;
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=jsonv2&limit=1`);
+      const results = await res.json();
+      if (!results || results.length === 0) {
+        alert(`Couldn't find "${query}" — try a different spelling or add a state.`);
+        return;
+      }
+      const { lat, lon } = results[0];
+      map.flyTo([Number(lat), Number(lon)], 13, { duration: 0.8 });
+      showPanel();
+    } catch {
+      alert('Location search failed — try again in a moment.');
+    }
+  }
+
+  function useMyLocation() {
+    if (!navigator.geolocation) {
+      alert("Your browser doesn't support location services.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        map.flyTo([pos.coords.latitude, pos.coords.longitude], 14, { duration: 0.8 });
+        showPanel();
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          alert('Location access was denied — you can still search by city/address above.');
+        } else {
+          alert("Couldn't get your location — try searching by city/address instead.");
+        }
+      }
+    );
+  }
+
+  document.getElementById('location-search-btn').addEventListener('click', searchLocation);
+  document.getElementById('location-search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchLocation();
+  });
+  document.getElementById('use-my-location-btn').addEventListener('click', useMyLocation);
+  document.getElementById('panel-close-btn').addEventListener('click', () => {
+    document.getElementById('side-panel').classList.remove('visible');
+  });
+
+  function makeBasketballIcon() {
+    return L.divIcon({
+      className: 'court-marker',
+      html: `
+        <div class="basketball-marker" style="width:22px; height:22px;">
+          <svg viewBox="0 0 24 24" width="22" height="22">
+            <circle cx="12" cy="12" r="10.2" fill="#C8631C" stroke="#3A2213" stroke-width="0.9"/>
+            <path d="M12 1.8 V22.2" stroke="#3A2213" stroke-width="1"/>
+            <path d="M1.8 12 H22.2" stroke="#3A2213" stroke-width="1"/>
+            <path d="M4.3 4.3 C9 8, 9 16, 4.3 19.7" stroke="#3A2213" stroke-width="1" fill="none"/>
+            <path d="M19.7 4.3 C15 8, 15 16, 19.7 19.7" stroke="#3A2213" stroke-width="1" fill="none"/>
+          </svg>
+        </div>
+      `,
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+      popupAnchor: [0, -12],
+    });
+  }
+  // Single shared icon instance — since it's no longer animated, every
+  // marker can safely reuse the same icon object instead of creating a
+  // new one per court, which cuts down on DOM/object churn at high counts.
+  const sharedBasketballIcon = makeBasketballIcon();
+
+  let markers = {};
+  // Marker clustering: groups nearby courts into a single numbered bubble
+  // until zoomed in enough to separate them. This is what actually fixes
+  // the lag in dense cities — without it, the browser has to render one
+  // full DOM element per court, even ones stacked on top of each other.
+  let markerLayer = L.markerClusterGroup({
+    maxClusterRadius: 60,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    iconCreateFunction: function (cluster) {
+      const count = cluster.getChildCount();
+      const size = count < 10 ? 34 : count < 50 ? 40 : 46;
+      return L.divIcon({
+        html: `<div style="
+          width:${size}px; height:${size}px; border-radius:50%;
+          background:rgba(35,37,39,0.92); border:2px solid #D6491F;
+          display:flex; align-items:center; justify-content:center;
+          color:#F0EDE6; font-weight:700; font-size:${count < 50 ? 13 : 14}px;
+          font-family:'Inter',sans-serif; box-shadow:0 3px 8px rgba(0,0,0,0.5);
+        ">${count}</div>`,
+        className: 'court-cluster-icon',
+        iconSize: [size, size],
+      });
+    },
+  }).addTo(map);
+
+  // Below this zoom level, a viewport query could span multiple cities/states
+  // worth of courts — too many markers to usefully render, so we show a
+  // "zoom in" message instead of querying.
+  const MIN_VIEWPORT_ZOOM = 11;
+
+  const els = {
+    search: document.getElementById('search'),
+    city: document.getElementById('city-filter'),
+    lit: document.getElementById('lit-filter'),
+    neighborhood: document.getElementById('neighborhood-filter'),
+    results: document.getElementById('results'),
+    count: document.getElementById('results-count'),
+  };
+
+  async function loadCities() {
+    const res = await fetch('/api/cities');
+    const cities = await res.json();
+    for (const c of cities) {
+      const opt = document.createElement('option');
+      opt.value = c.city;
+      opt.textContent = `${c.city} (${c.count})`;
+      els.city.appendChild(opt);
+    }
+    if (cities.length === 0) {
+      els.count.textContent = 'No data yet';
+      els.results.innerHTML = `<div class="empty-state">
+        No courts in the database yet. Run the import script from the project
+        root to pull real court data from OpenStreetMap:<br><br>
+        <code>npm run fetch-courts -- --city "Nashville"</code>
+      </div>`;
+    }
+  }
+
+  async function loadNeighborhoods() {
+    els.neighborhood.innerHTML = '<option value="">All areas</option>';
+    els.neighborhood.value = '';
+    if (!els.city.value) return; // no city selected, nothing to narrow by yet
+    const res = await fetch('/api/neighborhoods?city=' + encodeURIComponent(els.city.value));
+    const neighborhoods = await res.json();
+    for (const n of neighborhoods) {
+      const opt = document.createElement('option');
+      opt.value = n.neighborhood;
+      opt.textContent = `${n.neighborhood} (${n.count})`;
+      els.neighborhood.appendChild(opt);
+    }
+  }
+
+  function baseFilterParams() {
+    const params = new URLSearchParams();
+    if (els.search.value.trim()) params.set('q', els.search.value.trim());
+    if (els.lit.value) params.set('lit', els.lit.value);
+    return params;
+  }
+
+  // City mode: a specific city is selected — fetch all its courts (city-scale
+  // counts are small enough to load in full) and zoom the map to fit them.
+  async function loadCourtsByCity() {
+    const params = baseFilterParams();
+    params.set('city', els.city.value);
+    if (els.neighborhood.value) params.set('neighborhood', els.neighborhood.value);
+    const res = await fetch('/api/courts?' + params.toString());
+    const courts = await res.json();
+    renderResults(courts);
+    renderMarkers(courts, { fitToResults: true });
+  }
+
+  // Viewport mode ("All cities"): fetch only courts inside the map's current
+  // visible bounds, refetching as the user pans/zooms. Guards against
+  // zooming out too far, where a bounds query could span the whole country.
+  async function loadCourtsByViewport() {
+    if (map.getZoom() < MIN_VIEWPORT_ZOOM) {
+      markerLayer.clearLayers();
+      markers = {};
+      els.count.textContent = 'Zoom in to see courts';
+      els.results.innerHTML = `<div class="empty-state">
+        Zoomed out too far to load courts here. Zoom in on a city or area,
+        or pick a specific city from the dropdown above.
+      </div>`;
+      return;
+    }
+    const b = map.getBounds();
+    const params = baseFilterParams();
+    params.set('north', b.getNorth());
+    params.set('south', b.getSouth());
+    params.set('east', b.getEast());
+    params.set('west', b.getWest());
+    const res = await fetch('/api/courts?' + params.toString());
+    const courts = await res.json();
+    renderResults(courts);
+    renderMarkers(courts, { fitToResults: false });
+  }
+
+  // Dispatches to the right mode based on whether a city is selected.
+  async function loadCourts() {
+    if (els.city.value) {
+      await loadCourtsByCity();
+    } else {
+      await loadCourtsByViewport();
+    }
+  }
+
+  function renderResults(courts) {
+    els.count.textContent = courts.length === 1 ? '1 court' : `${courts.length} courts`;
+    if (courts.length === 0) {
+      els.results.innerHTML = `<div class="empty-state">No courts match those filters. Try clearing search or lighting filter.</div>`;
+      return;
+    }
+    els.results.innerHTML = '';
+    for (const c of courts) {
+      const card = document.createElement('div');
+      card.className = 'court-card';
+      card.dataset.id = c.id;
+      card.innerHTML = `
+        <p class="court-name">${escapeHtml(c.name)}</p>
+        <p class="court-meta">${escapeHtml(c.neighborhood ? `${c.neighborhood} — ${c.address || c.city}` : (c.address || c.city))}</p>
+        <div>
+          ${c.lit === 'yes' ? '<span class="tag tag-lit">Lit</span>' : ''}
+          ${c.hoops ? `<span class="tag tag-hoops">${c.hoops} hoop${c.hoops > 1 ? 's' : ''}</span>` : ''}
+        </div>
+        <button class="details-toggle" data-id="${c.id}">Details &amp; check in</button>
+        <div class="details-panel" id="details-${c.id}" style="display:none;"></div>
+      `;
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.details-toggle') || e.target.closest('.details-panel')) return;
+        map.flyTo([c.lat, c.lng], 16, { duration: 0.6 });
+        if (markers[c.id]) {
+          // If this marker is currently collapsed inside a cluster bubble,
+          // zoomToShowLayer zooms/spiderfies until it's actually visible,
+          // then opens its popup — plain openPopup() would silently fail
+          // on a marker that isn't rendered yet.
+          markerLayer.zoomToShowLayer(markers[c.id], () => markers[c.id].openPopup());
+        }
+      });
+      card.querySelector('.details-toggle').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleDetails(c.id);
+      });
+      els.results.appendChild(card);
+    }
+  }
+
+  function renderMarkers(courts, { fitToResults }) {
+    markerLayer.clearLayers();
+    markers = {};
+    const markerList = [];
+    for (const c of courts) {
+      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}`;
+      const amapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(c.name)}&ll=${c.lat},${c.lng}`;
+      const m = L.marker([c.lat, c.lng], { icon: sharedBasketballIcon })
+        .bindPopup(`
+          <b>${escapeHtml(c.name)}</b><br>
+          ${c.neighborhood ? `<span style="font-size:12px;color:#a8a39a;">${escapeHtml(c.neighborhood)}</span><br>` : ''}
+          ${escapeHtml(c.address || '')}
+          <div style="margin-top:8px; display:flex; gap:10px;">
+            <a href="${gmapsUrl}" target="_blank" rel="noopener" style="color:#D6491F; font-size:12.5px; text-decoration:none;">Open in Google Maps</a>
+            <a href="${amapsUrl}" target="_blank" rel="noopener" style="color:#D6491F; font-size:12.5px; text-decoration:none;">Apple Maps</a>
+          </div>
+        `);
+      markers[c.id] = m;
+      markerList.push(m);
+    }
+    // addLayers (bulk) is far faster than calling addTo per marker for
+    // marker-cluster groups — it batches the clustering calculation
+    // instead of recalculating it after every single insertion.
+    markerLayer.addLayers(markerList);
+    if (fitToResults && courts.length > 0) {
+      const bounds = L.latLngBounds(courts.map(c => [c.lat, c.lng]));
+      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 });
+    }
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
+  const BUSY_LABELS = ['', 'Empty', 'Light', 'Moderate', 'Busy', 'Packed'];
+
+  async function renderDetailsPanel(courtId, court, summary) {
+    const summaryHtml = summary
+      ? `
+        <h4>Ratings (${summary.count})</h4>
+        <p style="margin:0 0 10px; color:#cfcac1;">
+          ${summary.avgHoopQuality ? `Hoops: ${summary.avgHoopQuality.toFixed(1)}/5` : ''}
+          ${summary.commonSize ? ` &middot; Size: ${escapeHtml(summary.commonSize)}` : ''}
+          ${summary.avgCompetitionLevel ? ` &middot; Competition: ${summary.avgCompetitionLevel.toFixed(1)}/5` : ''}
+        </p>
+      `
+      : `<h4>Ratings</h4><p style="margin:0 0 10px; color:#8a8d90;">No ratings yet — be the first.</p>`;
+
+    const leaderboardRes = await fetch(`/api/courts/${courtId}/leaderboard`);
+    const leaderboard = await leaderboardRes.json();
+    const leaderboardHtml = leaderboard.length === 0
+      ? `<p style="color:#8a8d90; margin:0 0 10px;">No games recorded here yet.</p>`
+      : leaderboard.map((p, i) => `
+          <div class="leaderboard-row">
+            <span>#${i + 1} ${escapeHtml(p.username)}</span>
+            <span>${p.wins}W &middot; ${p.gamesPlayed} games</span>
+          </div>
+        `).join('');
+
+    const user = getUser();
+    const challengeHtml = user
+      ? `
+        <h4>Challenge a player</h4>
+        <div class="challenge-form">
+          <input type="text" class="challenge-opponent" data-court="${courtId}" placeholder="Opponent's username" />
+          <input type="text" class="challenge-message" data-court="${courtId}" placeholder="Message (optional)" />
+          <button class="challenge-submit-btn challenge-submit" data-court="${courtId}">Send challenge</button>
+        </div>
+      `
+      : `<h4>Challenge a player</h4><p style="color:#8a8d90; margin:0;"><a onclick="openLoginModal()" style="color:var(--paint-orange); cursor:pointer;">Log in</a> to challenge someone here.</p>`;
+
+    // Only unnamed courts get the suggest-a-name form — courts that
+    // already have a real name can only be corrected via the admin
+    // endpoint, to prevent anonymous overwriting of legitimate names.
+    const suggestNameHtml = court && court.name === 'Unnamed Court'
+      ? `
+        <h4>This court has no name yet</h4>
+        <div class="challenge-form">
+          <input type="text" class="suggest-name-input" data-court="${courtId}" placeholder="Suggest a name for this court" maxlength="60" />
+          <button class="challenge-submit-btn suggest-name-submit" data-court="${courtId}">Submit name</button>
+        </div>
+        <div class="details-feedback" id="name-feedback-${courtId}"></div>
+      `
+      : '';
+
+    return `
+      ${suggestNameHtml}
+      ${summaryHtml}
+      <h4>How busy is it right now?</h4>
+      <div class="busy-buttons">
+        ${[1, 2, 3, 4, 5].map(level => `<button class="busy-btn" data-court="${courtId}" data-level="${level}">${BUSY_LABELS[level]}</button>`).join('')}
+      </div>
+      <h4>Rate this court</h4>
+      <div class="rating-row">
+        <select class="rate-hoops" data-court="${courtId}">
+          <option value="">Hoop quality</option>
+          ${[5,4,3,2,1].map(n => `<option value="${n}">${n} / 5</option>`).join('')}
+        </select>
+      </div>
+      <div class="rating-row">
+        <select class="rate-size" data-court="${courtId}">
+          <option value="">Court size</option>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
+        </select>
+      </div>
+      <div class="rating-row">
+        <select class="rate-competition" data-court="${courtId}">
+          <option value="">Competition level</option>
+          ${[1,2,3,4,5].map(n => `<option value="${n}">${n} / 5${n===1?' (casual)':n===5?' (very competitive)':''}</option>`).join('')}
+        </select>
+      </div>
+      <button class="rating-submit" data-court="${courtId}">Submit rating</button>
+      <div class="details-feedback" id="feedback-${courtId}"></div>
+      <h4 style="margin-top:14px;">Leaderboard</h4>
+      ${leaderboardHtml}
+      ${challengeHtml}
+      <div class="details-feedback" id="challenge-feedback-${courtId}"></div>
+    `;
+  }
+
+  async function toggleDetails(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    if (!panel) return;
+    const isOpen = panel.style.display !== 'none';
+    if (isOpen) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+    panel.innerHTML = '<p style="color:#8a8d90;">Loading...</p>';
+    const [courtRes, summaryRes] = await Promise.all([
+      fetch(`/api/courts/${courtId}`),
+      fetch(`/api/courts/${courtId}/rating-summary`),
+    ]);
+    const court = await courtRes.json();
+    const summary = await summaryRes.json();
+    panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
+  }
+
+  async function submitCheckin(courtId, busyLevel, feedbackEl) {
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const hour = now.getHours();
+    try {
+      const res = await fetch(`/api/courts/${courtId}/checkin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dayOfWeek, hour, busyLevel }),
+      });
+      if (!res.ok) throw new Error('failed');
+      feedbackEl.textContent = 'Thanks — check-in saved.';
+    } catch {
+      feedbackEl.textContent = 'Could not save check-in, try again.';
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  async function submitRating(courtId, panel, feedbackEl) {
+    const hoopQuality = panel.querySelector('.rate-hoops').value;
+    const courtSize = panel.querySelector('.rate-size').value;
+    const competitionLevel = panel.querySelector('.rate-competition').value;
+    if (!hoopQuality && !courtSize && !competitionLevel) {
+      feedbackEl.textContent = 'Pick at least one field to rate.';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/courts/${courtId}/rating`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hoopQuality: hoopQuality ? Number(hoopQuality) : null,
+          courtSize: courtSize || null,
+          competitionLevel: competitionLevel ? Number(competitionLevel) : null,
+        }),
+      });
+      if (!res.ok) throw new Error('failed');
+      feedbackEl.textContent = 'Thanks — rating saved.';
+      // Refresh the panel's contents (court info + summary) after saving.
+      const [courtRes, summaryRes] = await Promise.all([
+        fetch(`/api/courts/${courtId}`),
+        fetch(`/api/courts/${courtId}/rating-summary`),
+      ]);
+      const court = await courtRes.json();
+      const summary = await summaryRes.json();
+      panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
+      document.getElementById(`feedback-${courtId}`).textContent = 'Thanks — rating saved.';
+    } catch {
+      feedbackEl.textContent = 'Could not save rating, try again.';
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  // Event delegation for details-panel buttons, since panels are rebuilt
+  // dynamically and re-binding individual listeners each time is wasteful.
+  document.getElementById('results').addEventListener('click', (e) => {
+    const busyBtn = e.target.closest('.busy-btn');
+    if (busyBtn) {
+      const courtId = busyBtn.dataset.court;
+      const level = Number(busyBtn.dataset.level);
+      const feedbackEl = document.getElementById(`feedback-${courtId}`);
+      submitCheckin(courtId, level, feedbackEl);
+      return;
+    }
+    const submitBtn = e.target.closest('.rating-submit');
+    if (submitBtn) {
+      const courtId = submitBtn.dataset.court;
+      const panel = document.getElementById(`details-${courtId}`);
+      const feedbackEl = document.getElementById(`feedback-${courtId}`);
+      submitRating(courtId, panel, feedbackEl);
+      return;
+    }
+    const challengeBtn = e.target.closest('.challenge-submit');
+    if (challengeBtn) {
+      const courtId = challengeBtn.dataset.court;
+      submitChallenge(courtId);
+      return;
+    }
+    const nameBtn = e.target.closest('.suggest-name-submit');
+    if (nameBtn) {
+      const courtId = nameBtn.dataset.court;
+      submitNameSuggestion(courtId);
+    }
+  });
+
+  async function submitNameSuggestion(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    const nameInput = panel.querySelector('.suggest-name-input');
+    const name = nameInput.value.trim();
+    const feedbackEl = document.getElementById(`name-feedback-${courtId}`);
+    if (name.length < 2) {
+      feedbackEl.textContent = 'Enter a name (at least 2 characters).';
+      feedbackEl.style.color = '#e08a8a';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/courts/${courtId}/suggest-name`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save name');
+      feedbackEl.textContent = 'Thanks — name saved!';
+      feedbackEl.style.color = '#a9d8c5';
+      // Brief pause so the confirmation is actually visible — the
+      // suggest-name form (and this feedback element) disappears once the
+      // panel re-renders, since the court now has a real name.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const [courtRes, summaryRes] = await Promise.all([
+        fetch(`/api/courts/${courtId}`),
+        fetch(`/api/courts/${courtId}/rating-summary`),
+      ]);
+      const court = await courtRes.json();
+      const summary = await summaryRes.json();
+      panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
+      loadCourts();
+    } catch (err) {
+      feedbackEl.textContent = err.message;
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  async function submitChallenge(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    const opponentUsername = panel.querySelector('.challenge-opponent').value.trim();
+    const message = panel.querySelector('.challenge-message').value.trim();
+    const feedbackEl = document.getElementById(`challenge-feedback-${courtId}`);
+    if (!opponentUsername) {
+      feedbackEl.textContent = 'Enter a username to challenge.';
+      feedbackEl.style.color = '#e08a8a';
+      return;
+    }
+    try {
+      const res = await authedFetch(`/api/courts/${courtId}/challenges`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ opponentUsername, message }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to send challenge');
+      feedbackEl.textContent = `Challenge sent to ${opponentUsername}!`;
+      feedbackEl.style.color = '#a9d8c5';
+    } catch (err) {
+      feedbackEl.textContent = err.message;
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
+
+  let debounceTimer;
+  function debouncedLoad() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(loadCourts, 250);
+  }
+
+  els.search.addEventListener('input', debouncedLoad);
+  els.city.addEventListener('change', () => { loadNeighborhoods().then(loadCourts); });
+  els.neighborhood.addEventListener('change', loadCourts);
+  els.lit.addEventListener('change', loadCourts);
+
+  // Refetch on pan/zoom, but only in viewport mode ("All cities") — when a
+  // specific city is selected, the map only moves because loadCourtsByCity
+  // just fit-bounded it, and re-querying on that would fight the city filter.
+  map.on('moveend', () => {
+    if (!els.city.value) debouncedLoad();
+  });
+
+  loadCities().then(loadCourts);
+</script>
+</body>
+</html>
