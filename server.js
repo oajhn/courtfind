@@ -1,7 +1,7 @@
 const path = require('path');
 const express = require('express');
 const {
-  getCities, getNeighborhoods, searchCourts, upsertCourts, updateCourt,
+  getCities, getNeighborhoods, searchCourts, upsertCourts, updateCourt, getCourtById,
   addCheckin, getBusyTimes, addRating, getRatingSummary,
   createUser, getUserByEmail, getUserByUsername, getUserById,
   markEmailVerified, updatePassword, createAuthToken, consumeAuthToken,
@@ -56,6 +56,42 @@ app.get('/api/courts', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load courts' });
+  }
+});
+
+// GET /api/courts/:id -> a single court's full record
+app.get('/api/courts/:id', async (req, res) => {
+  try {
+    const court = await getCourtById(req.params.id);
+    if (!court) return res.status(404).json({ error: 'Court not found' });
+    res.json(court);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load court' });
+  }
+});
+
+// POST /api/courts/:id/suggest-name  { name }
+// Public, no auth — but only works on courts that are still unnamed, so
+// this can't be used to overwrite a court that already has a real name
+// (that stays admin-only, via /api/admin/edit-court, to avoid vandalism
+// of legitimate names).
+app.post('/api/courts/:id/suggest-name', express.json(), async (req, res) => {
+  try {
+    const court = await getCourtById(req.params.id);
+    if (!court) return res.status(404).json({ error: 'Court not found' });
+    if (court.name !== 'Unnamed Court') {
+      return res.status(400).json({ error: 'This court already has a name — name suggestions are only for unnamed courts' });
+    }
+    const name = (req.body.name || '').trim();
+    if (!name || name.length < 2 || name.length > 60) {
+      return res.status(400).json({ error: 'Name must be 2-60 characters' });
+    }
+    const updated = await updateCourt(req.params.id, { name });
+    res.json({ updated: true, court: updated });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save name suggestion' });
   }
 });
 
