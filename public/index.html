@@ -1055,7 +1055,7 @@
 
   const BUSY_LABELS = ['', 'Empty', 'Light', 'Moderate', 'Busy', 'Packed'];
 
-  async function renderDetailsPanel(courtId, summary) {
+  async function renderDetailsPanel(courtId, court, summary) {
     const summaryHtml = summary
       ? `
         <h4>Ratings (${summary.count})</h4>
@@ -1090,7 +1090,22 @@
       `
       : `<h4>Challenge a player</h4><p style="color:#8a8d90; margin:0;"><a onclick="openLoginModal()" style="color:var(--paint-orange); cursor:pointer;">Log in</a> to challenge someone here.</p>`;
 
+    // Only unnamed courts get the suggest-a-name form — courts that
+    // already have a real name can only be corrected via the admin
+    // endpoint, to prevent anonymous overwriting of legitimate names.
+    const suggestNameHtml = court && court.name === 'Unnamed Court'
+      ? `
+        <h4>This court has no name yet</h4>
+        <div class="challenge-form">
+          <input type="text" class="suggest-name-input" data-court="${courtId}" placeholder="Suggest a name for this court" maxlength="60" />
+          <button class="challenge-submit-btn suggest-name-submit" data-court="${courtId}">Submit name</button>
+        </div>
+        <div class="details-feedback" id="name-feedback-${courtId}"></div>
+      `
+      : '';
+
     return `
+      ${suggestNameHtml}
       ${summaryHtml}
       <h4>How busy is it right now?</h4>
       <div class="busy-buttons">
@@ -1136,9 +1151,13 @@
     }
     panel.style.display = 'block';
     panel.innerHTML = '<p style="color:#8a8d90;">Loading...</p>';
-    const res = await fetch(`/api/courts/${courtId}/rating-summary`);
-    const summary = await res.json();
-    panel.innerHTML = await renderDetailsPanel(courtId, summary);
+    const [courtRes, summaryRes] = await Promise.all([
+      fetch(`/api/courts/${courtId}`),
+      fetch(`/api/courts/${courtId}/rating-summary`),
+    ]);
+    const court = await courtRes.json();
+    const summary = await summaryRes.json();
+    panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
   }
 
   async function submitCheckin(courtId, busyLevel, feedbackEl) {
@@ -1179,10 +1198,14 @@
       });
       if (!res.ok) throw new Error('failed');
       feedbackEl.textContent = 'Thanks — rating saved.';
-      // Refresh the summary shown at the top of the panel.
-      const summaryRes = await fetch(`/api/courts/${courtId}/rating-summary`);
+      // Refresh the panel's contents (court info + summary) after saving.
+      const [courtRes, summaryRes] = await Promise.all([
+        fetch(`/api/courts/${courtId}`),
+        fetch(`/api/courts/${courtId}/rating-summary`),
+      ]);
+      const court = await courtRes.json();
       const summary = await summaryRes.json();
-      panel.innerHTML = await renderDetailsPanel(courtId, summary);
+      panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
       document.getElementById(`feedback-${courtId}`).textContent = 'Thanks — rating saved.';
     } catch {
       feedbackEl.textContent = 'Could not save rating, try again.';
@@ -1213,8 +1236,51 @@
     if (challengeBtn) {
       const courtId = challengeBtn.dataset.court;
       submitChallenge(courtId);
+      return;
+    }
+    const nameBtn = e.target.closest('.suggest-name-submit');
+    if (nameBtn) {
+      const courtId = nameBtn.dataset.court;
+      submitNameSuggestion(courtId);
     }
   });
+
+  async function submitNameSuggestion(courtId) {
+    const panel = document.getElementById(`details-${courtId}`);
+    const nameInput = panel.querySelector('.suggest-name-input');
+    const name = nameInput.value.trim();
+    const feedbackEl = document.getElementById(`name-feedback-${courtId}`);
+    if (name.length < 2) {
+      feedbackEl.textContent = 'Enter a name (at least 2 characters).';
+      feedbackEl.style.color = '#e08a8a';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/courts/${courtId}/suggest-name`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save name');
+      feedbackEl.textContent = 'Thanks — name saved!';
+      feedbackEl.style.color = '#a9d8c5';
+      // Brief pause so the confirmation is actually visible — the
+      // suggest-name form (and this feedback element) disappears once the
+      // panel re-renders, since the court now has a real name.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const [courtRes, summaryRes] = await Promise.all([
+        fetch(`/api/courts/${courtId}`),
+        fetch(`/api/courts/${courtId}/rating-summary`),
+      ]);
+      const court = await courtRes.json();
+      const summary = await summaryRes.json();
+      panel.innerHTML = await renderDetailsPanel(courtId, court, summary);
+      loadCourts();
+    } catch (err) {
+      feedbackEl.textContent = err.message;
+      feedbackEl.style.color = '#e08a8a';
+    }
+  }
 
   async function submitChallenge(courtId) {
     const panel = document.getElementById(`details-${courtId}`);
