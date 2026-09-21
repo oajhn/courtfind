@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>CourtFinder — Public Outdoor Basketball Courts</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -518,6 +520,7 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
   const map = L.map('map', { zoomControl: false }).setView([36.1627, -86.7816], 12); // default: Nashville
   L.control.zoom({ position: 'bottomright' }).addTo(map);
@@ -848,7 +851,30 @@
   const sharedBasketballIcon = makeBasketballIcon();
 
   let markers = {};
-  let markerLayer = L.layerGroup().addTo(map);
+  // Marker clustering: groups nearby courts into a single numbered bubble
+  // until zoomed in enough to separate them. This is what actually fixes
+  // the lag in dense cities — without it, the browser has to render one
+  // full DOM element per court, even ones stacked on top of each other.
+  let markerLayer = L.markerClusterGroup({
+    maxClusterRadius: 60,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    iconCreateFunction: function (cluster) {
+      const count = cluster.getChildCount();
+      const size = count < 10 ? 34 : count < 50 ? 40 : 46;
+      return L.divIcon({
+        html: `<div style="
+          width:${size}px; height:${size}px; border-radius:50%;
+          background:rgba(35,37,39,0.92); border:2px solid #D6491F;
+          display:flex; align-items:center; justify-content:center;
+          color:#F0EDE6; font-weight:700; font-size:${count < 50 ? 13 : 14}px;
+          font-family:'Inter',sans-serif; box-shadow:0 3px 8px rgba(0,0,0,0.5);
+        ">${count}</div>`,
+        className: 'court-cluster-icon',
+        iconSize: [size, size],
+      });
+    },
+  }).addTo(map);
 
   // Below this zoom level, a viewport query could span multiple cities/states
   // worth of courts — too many markers to usefully render, so we show a
@@ -975,7 +1001,13 @@
       card.addEventListener('click', (e) => {
         if (e.target.closest('.details-toggle') || e.target.closest('.details-panel')) return;
         map.flyTo([c.lat, c.lng], 16, { duration: 0.6 });
-        if (markers[c.id]) markers[c.id].openPopup();
+        if (markers[c.id]) {
+          // If this marker is currently collapsed inside a cluster bubble,
+          // zoomToShowLayer zooms/spiderfies until it's actually visible,
+          // then opens its popup — plain openPopup() would silently fail
+          // on a marker that isn't rendered yet.
+          markerLayer.zoomToShowLayer(markers[c.id], () => markers[c.id].openPopup());
+        }
       });
       card.querySelector('.details-toggle').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -988,6 +1020,7 @@
   function renderMarkers(courts, { fitToResults }) {
     markerLayer.clearLayers();
     markers = {};
+    const markerList = [];
     for (const c of courts) {
       const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}`;
       const amapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(c.name)}&ll=${c.lat},${c.lng}`;
@@ -1001,9 +1034,13 @@
             <a href="${amapsUrl}" target="_blank" rel="noopener" style="color:#D6491F; font-size:12.5px; text-decoration:none;">Apple Maps</a>
           </div>
         `);
-      m.addTo(markerLayer);
       markers[c.id] = m;
+      markerList.push(m);
     }
+    // addLayers (bulk) is far faster than calling addTo per marker for
+    // marker-cluster groups — it batches the clustering calculation
+    // instead of recalculating it after every single insertion.
+    markerLayer.addLayers(markerList);
     if (fitToResults && courts.length > 0) {
       const bounds = L.latLngBounds(courts.map(c => [c.lat, c.lng]));
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 });
