@@ -5,9 +5,16 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// CRITICAL: without this handler, an idle connection getting dropped by
+// Neon (e.g. during auto-suspend or a routine connection recycle) throws
+// an unhandled 'error' event that crashes the ENTIRE Node process — not
+// just the request that happened to be running. This is a well-known 'pg'
+// library gotcha. With the handler in place, the pool just discards the
+// bad connection and opens a fresh one for the next query, as intended.
 pool.on('error', (err) => {
   console.error('Unexpected error on idle Postgres client (recovered, not fatal):', err.message);
 });
+
 // Run once at startup — creates the table if it doesn't exist yet,
 // and adds the neighborhood column if it's missing from an older table.
 async function init() {
@@ -37,9 +44,9 @@ async function init() {
     CREATE TABLE IF NOT EXISTS checkins (
       id SERIAL PRIMARY KEY,
       court_id INTEGER NOT NULL REFERENCES courts(id) ON DELETE CASCADE,
-      day_of_week INTEGER NOT NULL,
-      hour INTEGER NOT NULL,
-      busy_level INTEGER NOT NULL,
+      day_of_week INTEGER NOT NULL, -- 0=Sunday .. 6=Saturday, submitter's local time
+      hour INTEGER NOT NULL,        -- 0-23, submitter's local time
+      busy_level INTEGER NOT NULL,  -- 1=empty .. 5=packed
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_checkins_court ON checkins(court_id);
@@ -47,9 +54,9 @@ async function init() {
     CREATE TABLE IF NOT EXISTS ratings (
       id SERIAL PRIMARY KEY,
       court_id INTEGER NOT NULL REFERENCES courts(id) ON DELETE CASCADE,
-      hoop_quality INTEGER,
-      court_size TEXT,
-      competition_level INTEGER,
+      hoop_quality INTEGER,      -- 1-5
+      court_size TEXT,           -- 'small' | 'medium' | 'large'
+      competition_level INTEGER, -- 1-5, 1=casual .. 5=very competitive
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_ratings_court ON ratings(court_id);
@@ -67,7 +74,7 @@ async function init() {
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       token TEXT UNIQUE NOT NULL,
-      type TEXT NOT NULL,
+      type TEXT NOT NULL, -- 'verify_email' | 'reset_password'
       expires_at TIMESTAMP NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
@@ -78,7 +85,7 @@ async function init() {
       court_id INTEGER NOT NULL REFERENCES courts(id) ON DELETE CASCADE,
       challenger_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       opponent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      status TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | declined | completed | cancelled
       message TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
@@ -98,7 +105,7 @@ async function init() {
       id SERIAL PRIMARY KEY,
       game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      team TEXT NOT NULL,
+      team TEXT NOT NULL, -- 'A' | 'B'
       points INTEGER NOT NULL DEFAULT 0,
       is_winner BOOLEAN NOT NULL DEFAULT FALSE
     );
@@ -162,6 +169,12 @@ async function getNeighborhoods(city) {
   return rows.map((r) => ({ neighborhood: r.neighborhood, count: Number(r.count) }));
 }
 
+async function getCourtById(id) {
+  await ready;
+  const { rows } = await pool.query(`SELECT * FROM courts WHERE id = $1`, [id]);
+  return rows[0] || null;
+}
+
 async function searchCourts({ city, neighborhood, q, lit, minHoops, bounds, limit }) {
   await ready;
   let sql = `SELECT * FROM courts WHERE 1=1`;
@@ -187,6 +200,8 @@ async function searchCourts({ city, neighborhood, q, lit, minHoops, bounds, limi
     params.push(minHoops);
     sql += ` AND hoops >= $${params.length}`;
   }
+  // Map-viewport filtering: only courts currently visible on screen.
+  // `bounds` is {north, south, east, west} in degrees.
   if (bounds) {
     params.push(bounds.south);
     sql += ` AND lat >= $${params.length}`;
@@ -199,6 +214,8 @@ async function searchCourts({ city, neighborhood, q, lit, minHoops, bounds, limi
   }
   sql += ` ORDER BY name`;
 
+  // Always cap results — protects the browser from trying to render
+  // thousands of markers at once when zoomed out over many cities.
   const cap = Math.min(limit || 500, 1000);
   params.push(cap);
   sql += ` LIMIT $${params.length}`;
@@ -228,6 +245,8 @@ async function updateCourt(id, { name, neighborhood }) {
   return rows[0] || null;
 }
 
+// --- Check-ins (busy-time reports) ---
+
 async function addCheckin(courtId, { dayOfWeek, hour, busyLevel }) {
   await ready;
   const { rows } = await pool.query(
@@ -237,6 +256,9 @@ async function addCheckin(courtId, { dayOfWeek, hour, busyLevel }) {
   return rows[0];
 }
 
+// Aggregates all check-ins for a court into a day-of-week x hour grid,
+// averaging busy_level and counting reports per cell. Only cells with at
+// least one report are returned — the frontend fills gaps as "no data".
 async function getBusyTimes(courtId) {
   await ready;
   const { rows } = await pool.query(
@@ -253,6 +275,8 @@ async function getBusyTimes(courtId) {
     count: Number(r.count),
   }));
 }
+
+// --- Ratings (hoop quality / court size / competition level) ---
 
 async function addRating(courtId, { hoopQuality, courtSize, competitionLevel }) {
   await ready;
@@ -283,6 +307,8 @@ async function getRatingSummary(courtId) {
     count: Number(r.count),
   };
 }
+
+// --- Users & auth ---
 
 async function createUser({ username, email, passwordHash }) {
   await ready;
@@ -332,6 +358,8 @@ async function createAuthToken(userId, token, type, expiresAt) {
   );
 }
 
+// Looks up a token and, if valid and unexpired, deletes it (single-use)
+// and returns the associated user id. Returns null if invalid/expired.
 async function consumeAuthToken(token, type) {
   await ready;
   const { rows } = await pool.query(
@@ -342,6 +370,8 @@ async function consumeAuthToken(token, type) {
   await pool.query(`DELETE FROM auth_tokens WHERE id = $1`, [rows[0].id]);
   return rows[0].user_id;
 }
+
+// --- Challenges ---
 
 async function createChallenge({ courtId, challengerId, opponentId, message }) {
   await ready;
@@ -361,6 +391,7 @@ async function respondToChallenge(challengeId, userId, accept) {
   return rows[0] || null;
 }
 
+// Challenges involving a user, either sent or received, most recent first.
 async function getUserChallenges(userId) {
   await ready;
   const { rows } = await pool.query(
@@ -390,6 +421,10 @@ async function markChallengeCompleted(id) {
   await pool.query(`UPDATE challenges SET status = 'completed' WHERE id = $1`, [id]);
 }
 
+// --- Games & scorecards ---
+
+// `players` is an array of {userId, team: 'A'|'B', points}. Winning team is
+// whichever has the higher combined points; ties mean no winner is marked.
 async function recordGame({ courtId, challengeId, createdBy, players }) {
   await ready;
   const client = await pool.connect();
@@ -425,6 +460,7 @@ async function recordGame({ courtId, challengeId, createdBy, players }) {
   }
 }
 
+// Per-court leaderboard: wins, games played, total points, ranked by wins.
 async function getLeaderboard(courtId, limit = 20) {
   await ready;
   const { rows } = await pool.query(
@@ -451,7 +487,7 @@ async function getLeaderboard(courtId, limit = 20) {
 }
 
 module.exports = {
-  upsertCourts, getCities, getNeighborhoods, searchCourts, updateCourt,
+  upsertCourts, getCities, getNeighborhoods, searchCourts, updateCourt, getCourtById,
   addCheckin, getBusyTimes, addRating, getRatingSummary,
   createUser, getUserByEmail, getUserByUsername, getUserById,
   markEmailVerified, updatePassword, createAuthToken, consumeAuthToken,
